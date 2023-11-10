@@ -2,21 +2,18 @@ import cv2
 from ultralytics import YOLO
 import supervision as sv
 import numpy as np
-
 import subprocess
+import torch
+import torchvision
 
 def main():    
     rtmp_url = "rtmp://localhost:1935/live/mist2"
     path = "rtmp://localhost:1935/live/mist1"
     cap = cv2.VideoCapture(path)
-    # cap = cv2.VideoCapture(0)
 
-    # gather video info to ffmpeg
-    # fps = int(cap.get(cv2.CAP_PROP_FPS))
-    fps = 5
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
 
     command = ['ffmpeg',
             '-y',
@@ -30,11 +27,15 @@ def main():
             '-pix_fmt', 'yuv420p',
             '-preset', 'ultrafast',
             '-sws_flags', 'lanczos',
-            '-vf', 'scale=180:120',
+            '-vf', 'scale=640:480',
+            '-filter:v', 'minterpolate=mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=60',
+            '-filter:v', 'setpts=4.0*PTS',
+            '-r', '30',
             '-f', 'flv',
             rtmp_url]
 
     p = subprocess.Popen(command, stdin=subprocess.PIPE)
+    
     
     # =======================================================================================
     
@@ -45,7 +46,7 @@ def main():
     )
 
     model = YOLO("yolov8l.pt")
-    for result in model.track(source=path, show=False, stream=True):
+    for result in model.track(source=path, show=False, stream=True, device=0, verbose=False):
     
         frame = result.orig_img
         detections = sv.Detections.from_yolov8(result)
@@ -67,10 +68,10 @@ def main():
         
         numpy_array = np.array(frame)
         p.stdin.write(numpy_array.tobytes()) # rtmp 송신
-        cv2.imshow("yolov8", numpy_array)
+        # cv2.imshow("yolov8", numpy_array)
 
-        if (cv2.waitKey(30) == 27):
-            break
+        # if (cv2.waitKey(30) == 27):
+        #     break
         
 if __name__ == "__main__":
     main()
