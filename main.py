@@ -3,7 +3,40 @@ from ultralytics import YOLO
 import supervision as sv
 import numpy as np
 
+import subprocess
+
 def main():    
+    rtmp_url = "rtmp://localhost:1935/live/mist2"
+    path = "rtmp://localhost:1935/live/mist1"
+    cap = cv2.VideoCapture(path)
+
+    # gather video info to ffmpeg
+    # fps = int(cap.get(cv2.CAP_PROP_FPS))
+    # width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    # height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = 10
+    width = 640
+    height = 480
+
+    command = ['ffmpeg',
+            '-y',
+            '-f', 'rawvideo',
+            '-vcodec', 'rawvideo',
+            '-pix_fmt', 'bgr24',
+            '-s', "{}x{}".format(width, height),
+            '-r', str(fps),
+            '-i', '-',
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-preset', 'ultrafast',
+            '-f', 'flv',
+            rtmp_url]
+
+    p = subprocess.Popen(command, stdin=subprocess.PIPE)
+    
+    
+    # =======================================================================================
+    
     box_annotator = sv.BoxAnnotator(
         thickness=2,
         text_thickness=2,
@@ -11,7 +44,7 @@ def main():
     )
 
     model = YOLO("yolov8l.pt")
-    for result in model.track(source=0, show=True, stream=True):
+    for result in model.track(source=path, show=False, stream=True):
     
         frame = result.orig_img
         detections = sv.Detections.from_yolov8(result)
@@ -21,7 +54,7 @@ def main():
         detections = detections[detections.class_id != 60] # 다이닝 테이블 제외
         
         labels = [
-            f"{int(tracker_id)} {model.model.names[class_id]} {confidence:0.2f}"
+            f"{tracker_id} {model.model.names[class_id]} {confidence:0.2f}"
             for _, confidence, class_id, tracker_id
             in detections
         ]
@@ -31,7 +64,13 @@ def main():
             labels=labels
         )
         
-        cv2.imshow("yolov8", frame)
+        numpy_array = np.array(frame)
+        p.stdin.write(numpy_array.tobytes()) # rtmp 송신
+        # while cap.isOpened():
+        # for _ in range(len(frame)):
+        #     p.stdin.write(numpy_array.tobytes()) # rtmp 송신
+        
+        cv2.imshow("yolov8", numpy_array)
 
         if (cv2.waitKey(30) == 27):
             break
