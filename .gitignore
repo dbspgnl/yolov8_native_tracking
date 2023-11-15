@@ -3,3 +3,11 @@ __pycache__/
 /env
 /venv
 /weights
+
+# 데이터셋
+datasets/
+# 결과
+runs/
+
+# yolo pt
+*.pt
