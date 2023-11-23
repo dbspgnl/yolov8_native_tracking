@@ -6,13 +6,28 @@ import subprocess
 import torch
 import torchvision
 import argparse
+from typing import Dict, List, Set, Tuple
 
-colors = sv.ColorPalette.default()
-polygons = [
+COLORS = sv.ColorPalette.default()
+ZONE_IN_POLYGONS = [
     np.array([
-        [300, 300],[600, 300],[600, 600],[300, 600]
+        [87, 532],[1783, 532],[1783, 612],[87, 612]
     ])
 ]
+
+def initiate_polygon_zones(
+    polygons: List[np.ndarray],
+    frame_resolution_wh: Tuple[int, int],
+    triggering_position: sv.Position = sv.Position.CENTER,
+) -> List[sv.PolygonZone]:
+    return [
+        sv.PolygonZone(
+            polygon=polygon,
+            frame_resolution_wh=frame_resolution_wh,
+            triggering_position=triggering_position,
+        )
+        for polygon in polygons
+    ]
 
 class FFmpegProcessor:
     def __init__(self, input_path, output_path) -> None:
@@ -66,66 +81,72 @@ class VideoProcessor:
         self.process = ffmpeg.setPath()
         self.width = ffmpeg.getWidth()
         self.height = ffmpeg.getHeight()
+        self.zones_in = initiate_polygon_zones(
+            ZONE_IN_POLYGONS, (self.width, self.height), sv.Position.CENTER
+        )
 
-    def process_video(self): #1
+    def process_video(self): 
 
-        zones = [
-            sv.PolygonZone(
-                polygon=polygon,
-                # frame_resolution_wh=video_info.resolution_wh
-                frame_resolution_wh=(self.width,self.height)
-            )
-            for polygon
-            in polygons
-        ]
-        zone_annotators = [
-            sv.PolygonZoneAnnotator(
-                zone=zone,
-                color=colors.by_idx(index),
-                thickness=4,
-                text_thickness=8,
-                text_scale=4
-            )
-            for index, zone
-            in enumerate(zones)
-        ]
-        box_annotators = [
-            sv.BoxAnnotator(
-                color=colors.by_idx(index),
-                thickness=4,
-                text_thickness=4,
-                text_scale=2
-                )
-            for index
-            in range(len(polygons))
-        ]
-        
         # 소스, 보기, 스트림, GPU, 로그, 더블디텍션
-        for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True):
+        for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
         
             frame = result.orig_img
             detections = sv.Detections.from_yolov8(result)
+            detections.class_id = np.zeros(len(detections))
             
             if result.boxes.id is not None:
                 detections.tracker_id = result.boxes.id.cpu().numpy().astype(int)
             detections = detections[detections.class_id != 60] # 다이닝 테이블 60번 제외
             
-            labels = [
-                f"{tracker_id} {self.model.model.names[class_id]} {confidence:0.2f}"
-                for _, confidence, class_id, tracker_id
-                in detections
-            ]
+            annotated_frame = self.annotate_frame(frame, detections)
             
-            for zone, zone_annotator, box_annotator in zip(zones, zone_annotators, box_annotators):
-                frame = box_annotator.annotate(scene=frame, detections=detections, labels=labels)
-                frame = zone_annotator.annotate(scene=frame)
+            numpy_array = np.array(annotated_frame)
+            if numpy_array is not None:
+                self.process.stdin.write(numpy_array.tobytes()) # Output FFmepg
+                cv2.imshow("OpenCV View", numpy_array)
             
-            numpy_array = np.array(frame)
-            self.process.stdin.write(numpy_array.tobytes()) # rtmp 송신
-            
-            cv2.imshow("OpenCV View", numpy_array)
             if (cv2.waitKey(30) == 27):
                 break
+            
+            
+    def annotate_frame(
+        self, frame: np.ndarray, detections: sv.Detections
+    ) -> np.ndarray:
+        # 라벨 처리
+        labels = [
+            f"{tracker_id} {self.model.names[class_id]} {confidence:0.2f}"
+            for _, confidence, class_id, tracker_id
+            in detections
+        ]
+        
+        # 프레임 처리
+        annotated_frame = frame.copy()
+        # 영역 처리
+        for i, zone_in in enumerate(self.zones_in):
+            annotated_frame = sv.draw_polygon(
+                annotated_frame, zone_in.polygon, COLORS.colors[i+1]
+            )
+            sv.PolygonZoneAnnotator(
+                zone=zone_in,
+                color=COLORS.colors[i+1],
+                thickness=1,
+                text_thickness=1,
+                text_scale=1
+            )
+        # 박스 처리
+        box_annotator = sv.BoxAnnotator(
+            color=COLORS.by_idx(0),
+            thickness=1,
+            text_thickness=1,
+            text_scale=1
+        )
+        annotated_frame = box_annotator.annotate(
+            scene=frame, 
+            detections=detections, 
+            labels=labels
+        )
+
+        return annotated_frame
     
         
 if __name__ == "__main__":
