@@ -84,19 +84,18 @@ class VideoProcessor:
         self.zones_in = initiate_polygon_zones(
             ZONE_IN_POLYGONS, (self.width, self.height), sv.Position.CENTER
         )
+        self.bounding_box_annotator = sv.BoundingBoxAnnotator(thickness=0)
+        self.label_annotator = sv.LabelAnnotator(text_scale=0.5, text_padding=5)
 
     def process_video(self): 
 
         # 소스, 보기, 스트림, GPU, 로그, 더블디텍션
         for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
-        
             frame = result.orig_img
-            detections = sv.Detections.from_yolov8(result)
-            detections.class_id = np.zeros(len(detections))
+            detections = sv.Detections.from_ultralytics(result)
             
             if result.boxes.id is not None:
                 detections.tracker_id = result.boxes.id.cpu().numpy().astype(int)
-            detections = detections[detections.class_id != 60] # 다이닝 테이블 60번 제외
             
             annotated_frame = self.annotate_frame(frame, detections)
             
@@ -105,21 +104,13 @@ class VideoProcessor:
                 self.process.stdin.write(numpy_array.tobytes()) # Output FFmepg
                 cv2.imshow("OpenCV View", numpy_array)
             
-            if (cv2.waitKey(30) == 27):
+            if (cv2.waitKey(30) == 27): # ESC > stop
                 break
             
             
     def annotate_frame(
         self, frame: np.ndarray, detections: sv.Detections
     ) -> np.ndarray:
-        # 라벨 처리
-        labels = [
-            f"{tracker_id} {self.model.names[class_id]} {confidence:0.2f}"
-            for _, confidence, class_id, tracker_id
-            in detections
-        ]
-        
-        # 프레임 처리
         annotated_frame = frame.copy()
         # 영역 처리
         for i, zone_in in enumerate(self.zones_in):
@@ -133,19 +124,19 @@ class VideoProcessor:
                 text_thickness=1,
                 text_scale=1
             )
-        # 박스 처리
-        box_annotator = sv.BoxAnnotator(
-            color=COLORS.by_idx(0),
-            thickness=1,
-            text_thickness=1,
-            text_scale=1
+        # 바운딩 박스
+        annotated_frame = self.bounding_box_annotator.annotate(
+            scene=annotated_frame, detections=detections
         )
-        annotated_frame = box_annotator.annotate(
-            scene=frame, 
-            detections=detections, 
-            labels=labels
+        # 라벨
+        labels = [
+            f"{tracker_id} {self.model.names[class_id]} {confidence:0.2f}"
+            for confidence, class_id, tracker_id
+            in zip(detections.confidence, detections.class_id, detections.tracker_id)
+        ]
+        annotated_frame = self.label_annotator.annotate(
+            scene=annotated_frame, detections=detections, labels=labels
         )
-
         return annotated_frame
     
         
