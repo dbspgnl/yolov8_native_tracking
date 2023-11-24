@@ -21,3 +21,7 @@ data/
 # .vscode
 # "cwd": "${fileDirname}"
 .vscode/
+
+
+# opencv
+opencv/

@@ -107,9 +107,14 @@ class VideoProcessor:
         self.detections_manager = DetectionsManager()
         self.bounding_box_annotator = sv.BoundingBoxAnnotator(thickness=0)
         self.label_annotator = sv.LabelAnnotator(text_scale=0.5, text_padding=5)
-
+    def nothing(x):
+        pass
 
     def process_video(self): 
+        cv2.namedWindow("OpenCV View") #
+        cv2.createTrackbar('Mixing', 'OpenCV View', 0,100, self.nothing) #
+        mix = cv2.getTrackbarPos('Mixing','OpenCV View') #
+        
         for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
             frame = result.orig_img
             detections = sv.Detections.from_ultralytics(result)
@@ -128,13 +133,20 @@ class VideoProcessor:
             annotated_frame = self.annotate_frame(frame, detections)
             # Output 처리
             numpy_array = np.array(annotated_frame)
-            if numpy_array is not None:
-                self.process.stdin.write(numpy_array.tobytes()) # Output FFmepg
-                cv2.imshow("OpenCV View", numpy_array)
+            numpy_array = cv2.resize(numpy_array, dsize=(1920, 1080), interpolation=cv2.INTER_AREA) #
+            
+            im2 =  cv2.imread("./1920.png") #
+            im2 = cv2.resize(im2, dsize=(1920, 1080), interpolation=cv2.INTER_AREA) #
+            img = cv2.addWeighted(numpy_array, float(100-mix)/100, im2 , float(mix)/100, 0) #
+            
+            if img is not None:
+                self.process.stdin.write(img.tobytes()) # Output FFmepg
+                cv2.imshow("OpenCV View", img)
             
             if (cv2.waitKey(30) == 27): # ESC > stop
                 break
             
+            mix = cv2.getTrackbarPos("Mixing","OpenCV View") #
             
     def annotate_frame(
         self, frame: np.ndarray, detections: sv.Detections
