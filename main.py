@@ -29,6 +29,26 @@ def initiate_polygon_zones(
         for polygon in polygons
     ]
 
+class DetectionsManager:
+    def __init__(self) -> None:
+        self.tracker_id_to_zone_id: Dict[int, int] = {}
+
+    def update(
+        self,
+        detections_all: sv.Detections,
+        detections_in_zones: List[sv.Detections],
+    ) -> sv.Detections:
+        detections_all = sv.Detections.merge(detections_in_zones) # 영역 내 데이터만 처리
+        for zone_in_id, detections_in_zone in enumerate(detections_in_zones):
+            for tracker_id in detections_in_zone.tracker_id:
+                self.tracker_id_to_zone_id.setdefault(tracker_id, zone_in_id)
+        
+        detections_all.class_id = np.vectorize(
+            lambda x: self.tracker_id_to_zone_id.get(x, -1)
+        )(detections_all.tracker_id)
+        return detections_all[detections_all.class_id != -1]
+
+
 class FFmpegProcessor:
     def __init__(self, input_path, output_path) -> None:
         self.cap = cv2.VideoCapture(input_path)
@@ -84,21 +104,29 @@ class VideoProcessor:
         self.zones_in = initiate_polygon_zones(
             ZONE_IN_POLYGONS, (self.width, self.height), sv.Position.CENTER
         )
+        self.detections_manager = DetectionsManager()
         self.bounding_box_annotator = sv.BoundingBoxAnnotator(thickness=0)
         self.label_annotator = sv.LabelAnnotator(text_scale=0.5, text_padding=5)
 
-    def process_video(self): 
 
-        # 소스, 보기, 스트림, GPU, 로그, 더블디텍션
+    def process_video(self): 
         for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
             frame = result.orig_img
             detections = sv.Detections.from_ultralytics(result)
-            
+            # Tracker id
             if result.boxes.id is not None:
                 detections.tracker_id = result.boxes.id.cpu().numpy().astype(int)
-            
+            # Detect Area 처리
+            detections_in_zones = []
+            for zone_in in self.zones_in:
+                detections_in_zone = detections[zone_in.trigger(detections=detections)]
+                detections_in_zones.append(detections_in_zone)
+            detections = self.detections_manager.update(
+                detections, detections_in_zones
+            )
+            # Annotation 처리
             annotated_frame = self.annotate_frame(frame, detections)
-            
+            # Output 처리
             numpy_array = np.array(annotated_frame)
             if numpy_array is not None:
                 self.process.stdin.write(numpy_array.tobytes()) # Output FFmepg
