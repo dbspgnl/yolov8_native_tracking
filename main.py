@@ -29,6 +29,25 @@ def initiate_polygon_zones(
         for polygon in polygons
     ]
 
+class ImageOverlayBlending:
+    def __init__(self, imgPath) -> None:
+        self.imgPath:str = imgPath
+        self.mix:float = 0
+        cv2.namedWindow("OpenCV View") #
+        cv2.createTrackbar('Mixing', 'OpenCV View', 0,100, lambda x:x) 
+    
+    def setMix(
+        self,
+        numpy_array
+    ) -> np.array:
+        numpy_array = cv2.resize(numpy_array, dsize=(1920, 1080), interpolation=cv2.INTER_AREA) #
+        im2 = cv2.imread(self.imgPath) #
+        im2 = cv2.resize(im2, dsize=(1920, 1080), interpolation=cv2.INTER_AREA) #
+        img = cv2.addWeighted(numpy_array, float(100-self.mix)/100, im2 , float(self.mix)/100, 0) #
+        self.mix = cv2.getTrackbarPos('Mixing','OpenCV View')
+        return img
+    
+    
 class DetectionsManager:
     def __init__(self) -> None:
         self.tracker_id_to_zone_id: Dict[int, int] = {}
@@ -40,8 +59,9 @@ class DetectionsManager:
     ) -> sv.Detections:
         detections_all = sv.Detections.merge(detections_in_zones) # 영역 내 데이터만 처리
         for zone_in_id, detections_in_zone in enumerate(detections_in_zones):
-            for tracker_id in detections_in_zone.tracker_id:
-                self.tracker_id_to_zone_id.setdefault(tracker_id, zone_in_id)
+            if detections_in_zone.tracker_id is not None:
+                for tracker_id in detections_in_zone.tracker_id:
+                    self.tracker_id_to_zone_id.setdefault(tracker_id, zone_in_id)
         
         detections_all.class_id = np.vectorize(
             lambda x: self.tracker_id_to_zone_id.get(x, -1)
@@ -76,10 +96,9 @@ class FFmpegProcessor:
                 '-pix_fmt', 'yuv420p',
                 '-preset', 'ultrafast',
                 '-sws_flags', 'lanczos',
-                '-vf', 'scale=640:480',
-                '-filter:v', 'minterpolate=mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=60',
+                # '-filter:v', 'minterpolate=mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=30',
                 '-filter:v', 'setpts=4.0*PTS',
-                '-r', '15',
+                '-r', '30',
                 '-f', 'flv',
                 self.target]
         return subprocess.Popen(command, stdin=subprocess.PIPE)
@@ -107,13 +126,9 @@ class VideoProcessor:
         self.detections_manager = DetectionsManager()
         self.bounding_box_annotator = sv.BoundingBoxAnnotator(thickness=0)
         self.label_annotator = sv.LabelAnnotator(text_scale=0.5, text_padding=5)
-    def nothing(x):
-        pass
+        self.overlay = ImageOverlayBlending("1920.png") # 블렌딩 이미지 경로
 
     def process_video(self): 
-        cv2.namedWindow("OpenCV View") #
-        cv2.createTrackbar('Mixing', 'OpenCV View', 0,100, self.nothing) #
-        mix = cv2.getTrackbarPos('Mixing','OpenCV View') #
         
         for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
             frame = result.orig_img
@@ -133,20 +148,15 @@ class VideoProcessor:
             annotated_frame = self.annotate_frame(frame, detections)
             # Output 처리
             numpy_array = np.array(annotated_frame)
-            numpy_array = cv2.resize(numpy_array, dsize=(1920, 1080), interpolation=cv2.INTER_AREA) #
+            # 오버레이 블렌딩 처리
+            numpy_array = self.overlay.setMix(numpy_array)
             
-            im2 =  cv2.imread("./1920.png") #
-            im2 = cv2.resize(im2, dsize=(1920, 1080), interpolation=cv2.INTER_AREA) #
-            img = cv2.addWeighted(numpy_array, float(100-mix)/100, im2 , float(mix)/100, 0) #
-            
-            if img is not None:
-                self.process.stdin.write(img.tobytes()) # Output FFmepg
-                cv2.imshow("OpenCV View", img)
+            if numpy_array is not None:
+                self.process.stdin.write(numpy_array.tobytes()) # Output FFmepg
+                cv2.imshow("OpenCV View", numpy_array)
             
             if (cv2.waitKey(30) == 27): # ESC > stop
                 break
-            
-            mix = cv2.getTrackbarPos("Mixing","OpenCV View") #
             
     def annotate_frame(
         self, frame: np.ndarray, detections: sv.Detections
