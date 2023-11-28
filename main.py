@@ -8,7 +8,9 @@ import torchvision
 import argparse
 from typing import Dict, List, Set, Tuple
 
-COLORS = sv.ColorPalette.default()
+# COLORS = sv.ColorPalette.default()
+COLORS = sv.ColorPalette.from_hex(['#ff8a0d', '##5d9bff', '##7cae01', '###ffeb00']) # car, truck, bus, vehicle
+
 ZONE_IN_POLYGONS = [
     np.array([
         [87, 532],[1783, 532],[1783, 612],[87, 612]
@@ -63,10 +65,12 @@ class DetectionsManager:
                 for tracker_id in detections_in_zone.tracker_id:
                     self.tracker_id_to_zone_id.setdefault(tracker_id, zone_in_id)
         
-        detections_all.class_id = np.vectorize(
-            lambda x: self.tracker_id_to_zone_id.get(x, -1)
-        )(detections_all.tracker_id)
-        return detections_all[detections_all.class_id != -1]
+        # detections_all.class_id = np.vectorize(
+        #     lambda x: self.tracker_id_to_zone_id.get(x, -1)
+        # )(detections_all.tracker_id)
+        # return detections_all[detections_all.class_id != -1]
+        
+        return detections_all
 
 
 class FFmpegProcessor:
@@ -125,17 +129,18 @@ class VideoProcessor:
         )
         self.detections_manager = DetectionsManager()
         self.bounding_box_annotator = sv.BoundingBoxAnnotator(thickness=0)
-        self.label_annotator = sv.LabelAnnotator(text_scale=0.5, text_padding=5)
+        self.label_annotator = sv.LabelAnnotator(color=COLORS, text_scale=0.35, text_padding=2, color_lookup=sv.ColorLookup.CLASS)
         self.overlay = ImageOverlayBlending("1920.png") # 블렌딩 이미지 경로
 
     def process_video(self): 
         
         for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
+            if result.boxes.id is None: # 검출이 안되면 스킵
+                continue
             frame = result.orig_img
             detections = sv.Detections.from_ultralytics(result)
             # Tracker id
-            if result.boxes.id is not None:
-                detections.tracker_id = result.boxes.id.cpu().numpy().astype(int)
+            detections.tracker_id = result.boxes.id.cpu().numpy().astype(int)
             # Detect Area 처리
             detections_in_zones = []
             for zone_in in self.zones_in:
@@ -165,11 +170,11 @@ class VideoProcessor:
         # 영역 처리
         for i, zone_in in enumerate(self.zones_in):
             annotated_frame = sv.draw_polygon(
-                annotated_frame, zone_in.polygon, COLORS.colors[i+1]
+                annotated_frame, zone_in.polygon, sv.Color.from_hex('#ffffff')
             )
             sv.PolygonZoneAnnotator(
                 zone=zone_in,
-                color=COLORS.colors[i+1],
+                color=sv.Color.from_hex('#ffffff'),
                 thickness=1,
                 text_thickness=1,
                 text_scale=1
@@ -184,6 +189,7 @@ class VideoProcessor:
             for confidence, class_id, tracker_id
             in zip(detections.confidence, detections.class_id, detections.tracker_id)
         ]
+            
         annotated_frame = self.label_annotator.annotate(
             scene=annotated_frame, detections=detections, labels=labels
         )
