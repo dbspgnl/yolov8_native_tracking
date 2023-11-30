@@ -7,9 +7,10 @@ import torch
 import torchvision
 import argparse
 from typing import Dict, List, Set, Tuple
+import math
+from datetime import datetime
 
-# COLORS = sv.ColorPalette.default()
-COLORS = sv.ColorPalette.from_hex(['#ff8a0d', '##5d9bff', '##7cae01', '###ffeb00']) # car, truck, bus, vehicle
+COLORS = sv.ColorPalette.from_hex(['#ff8a0d', '#5d9bff', '#7cae01', '#ffeb00']) # car, truck, bus, vehicle
 
 ZONE_IN_POLYGONS = [
     np.array([
@@ -48,29 +49,6 @@ class ImageOverlayBlending:
         img = cv2.addWeighted(numpy_array, float(100-self.mix)/100, im2 , float(self.mix)/100, 0) #
         self.mix = cv2.getTrackbarPos('Mixing','OpenCV View')
         return img
-    
-    
-class DetectionsManager:
-    def __init__(self) -> None:
-        self.tracker_id_to_zone_id: Dict[int, int] = {}
-
-    def update(
-        self,
-        detections_all: sv.Detections,
-        detections_in_zones: List[sv.Detections],
-    ) -> sv.Detections:
-        detections_all = sv.Detections.merge(detections_in_zones) # 영역 내 데이터만 처리
-        for zone_in_id, detections_in_zone in enumerate(detections_in_zones):
-            if detections_in_zone.tracker_id is not None:
-                for tracker_id in detections_in_zone.tracker_id:
-                    self.tracker_id_to_zone_id.setdefault(tracker_id, zone_in_id)
-        
-        # detections_all.class_id = np.vectorize(
-        #     lambda x: self.tracker_id_to_zone_id.get(x, -1)
-        # )(detections_all.tracker_id)
-        # return detections_all[detections_all.class_id != -1]
-        
-        return detections_all
 
 
 class FFmpegProcessor:
@@ -127,18 +105,28 @@ class VideoProcessor:
         self.zones_in = initiate_polygon_zones(
             ZONE_IN_POLYGONS, (self.width, self.height), sv.Position.CENTER
         )
-        self.detections_manager = DetectionsManager()
-        self.bounding_box_annotator = sv.BoundingBoxAnnotator(thickness=0)
+        self.bounding_box_annotator = sv.BoundingBoxAnnotator(color=COLORS, thickness=0)
         self.label_annotator = sv.LabelAnnotator(color=COLORS, text_scale=0.35, text_padding=2, color_lookup=sv.ColorLookup.CLASS)
         self.overlay = ImageOverlayBlending("1920.png") # 블렌딩 이미지 경로
+        self.identity = dict()
+        self.frame_number = 0
 
     def process_video(self): 
         
         for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
+            now = datetime.now()
+            timestamp = now.timestamp()
+            format_time = now.strftime('%Y-%m-%d %H:%M:%S)')
+            self.frame_number += 1
+            # print(f"time: {format_time}  | frame: {self.frame_number} ")
+            
             if result.boxes.id is None: # 검출이 안되면 스킵
                 continue
             frame = result.orig_img
             detections = sv.Detections.from_ultralytics(result)
+            
+            self.set_identity(detections)
+            
             # Tracker id
             detections.tracker_id = result.boxes.id.cpu().numpy().astype(int)
             # Detect Area 처리
@@ -146,9 +134,8 @@ class VideoProcessor:
             for zone_in in self.zones_in:
                 detections_in_zone = detections[zone_in.trigger(detections=detections)]
                 detections_in_zones.append(detections_in_zone)
-            detections = self.detections_manager.update(
-                detections, detections_in_zones
-            )
+            detections = sv.Detections.merge(detections_in_zones)
+
             # Annotation 처리
             annotated_frame = self.annotate_frame(frame, detections)
             # Output 처리
@@ -185,7 +172,8 @@ class VideoProcessor:
         )
         # 라벨
         labels = [
-            f"{tracker_id} {self.model.names[class_id]} {confidence:0.2f}"
+            # f"{tracker_id} {self.model.names[class_id]} {confidence:0.2f}"
+            f"{tracker_id} : {self.identity[tracker_id]['speed']}km"
             for confidence, class_id, tracker_id
             in zip(detections.confidence, detections.class_id, detections.tracker_id)
         ]
@@ -195,7 +183,36 @@ class VideoProcessor:
         )
         return annotated_frame
     
-        
+    def set_identity(self, detections: sv.Detections) -> None:
+        for i in range(len(detections.xyxy)):
+            xyxy = detections.xyxy[i]
+            tracker_id = detections.tracker_id[i]
+            frame_number = self.frame_number
+            center = (round((xyxy[0]+xyxy[2])/2, 2), round((xyxy[1]+xyxy[3])/2),2)
+            if tracker_id not in self.identity:
+                self.identity[tracker_id] = {
+                    "id": tracker_id,
+                    "position": xyxy,
+                    "frame": frame_number,
+                    "center": center,
+                    "center_array": [center],
+                    "speed": 0
+                }
+            else:
+                self.identity[tracker_id]['center_array'].append(center)
+                speed = self.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2])
+                self.identity[tracker_id]['speed'] = speed
+    
+    def estimatespeed(self, Location1, Location2):
+        location_x = abs(Location2[0] - Location1[0])
+        location_y = abs(Location2[1] - Location1[1])
+        d_pixel = math.sqrt(math.pow(location_x, 2) + math.pow(location_y, 2))
+        ppm = 6.8 # 1픽셀당 거리계산
+        d_meters = d_pixel/ppm # defining thr pixels per meter
+        speed = d_meters * 60
+        return int(speed)
+    
+    
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Traffic Flow Analysis with YOLOv8")
     parser.add_argument(
