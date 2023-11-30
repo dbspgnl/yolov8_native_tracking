@@ -207,9 +207,9 @@ class VideoProcessor:
         location_x = abs(Location2[0] - Location1[0])
         location_y = abs(Location2[1] - Location1[1])
         d_pixel = math.sqrt(math.pow(location_x, 2) + math.pow(location_y, 2))
-        ppm = 6.8 # 1픽셀당 거리계산
+        ppm = 4.66 # 1픽셀당 거리계산
         d_meters = d_pixel/ppm # defining thr pixels per meter
-        speed = d_meters * 60
+        speed = d_meters * 8.6 * 3.6 # meter x fps x km
         return int(speed)
     
     
