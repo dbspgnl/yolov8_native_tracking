@@ -25,3 +25,7 @@ data/
 
 # opencv
 opencv/
+
+# build / deploy
+dist/
+build/
