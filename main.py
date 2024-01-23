@@ -9,6 +9,7 @@ import argparse
 from typing import Dict, List, Set, Tuple
 import math
 from datetime import datetime
+# from collections import defaultdict, deque
 
 COLORS = sv.ColorPalette.from_hex(['#ff8a0d', '#5d9bff', '#7cae01', '#ffeb00']) # car, truck, bus, vehicle
 
@@ -17,6 +18,7 @@ ZONE_IN_POLYGONS = [
         [87, 532],[1783, 532],[1783, 812],[87, 812]
     ])
 ]
+
 
 def initiate_polygon_zones(
     polygons: List[np.ndarray],
@@ -31,24 +33,6 @@ def initiate_polygon_zones(
         )
         for polygon in polygons
     ]
-
-# class ImageOverlayBlending:
-#     def __init__(self, imgPath) -> None:
-#         self.imgPath:str = imgPath
-#         self.mix:float = 0
-#         cv2.namedWindow("OpenCV View") #
-#         cv2.createTrackbar('Mixing', 'OpenCV View', 0,100, lambda x:x) 
-    
-#     def setMix(
-#         self,
-#         numpy_array
-#     ) -> np.array:
-#         numpy_array = cv2.resize(numpy_array, dsize=(1920, 1080), interpolation=cv2.INTER_AREA) #
-#         im2 = cv2.imread(self.imgPath) #
-#         im2 = cv2.resize(im2, dsize=(1920, 1080), interpolation=cv2.INTER_AREA) #
-#         img = cv2.addWeighted(numpy_array, float(100-self.mix)/100, im2 , float(self.mix)/100, 0) #
-#         self.mix = cv2.getTrackbarPos('Mixing','OpenCV View')
-#         return img
 
 
 class FFmpegProcessor:
@@ -98,6 +82,7 @@ class VideoProcessor:
 
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
+        # self.tracker = sv.ByteTrack( frame_rate=60, track_thresh=0.3 )
         
         ffmpeg = FFmpegProcessor(source_video_path, target_video_path)
         self.process = ffmpeg.setPath()
@@ -111,38 +96,62 @@ class VideoProcessor:
         # self.overlay = ImageOverlayBlending("1920.png") # 블렌딩 이미지 경로
         self.identity = dict()
         self.frame_number = 0
+        self.video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
+        # self.coordinates = defaultdict(lambda: deque(maxlen=self.video_info.fps))
 
     def process_video(self): 
-        for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
-            now = datetime.now()
-            timestamp = now.timestamp()
-            format_time = now.strftime('%Y-%m-%d %H:%M:%S)')
-            self.frame_number += 1 # 현재 프레임 카운팅
-            
-            if result.boxes.id is None: # 검출이 안되면 스킵
-                continue
-            frame = result.orig_img
-            detections = sv.Detections.from_ultralytics(result)
-            # detections.class_id = np.zeros(len(detections))
-            detections = self.tracker.update_with_detections(detections)
-            
-            # Tracker id
-            if result.boxes is None or result.boxes.id is None:
-                detections.tracker_id = result.boxes.id.cpu().numpy().astype(int)
+        second = 0
+        # video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
+        # print(video_info.fps)
+        # coordinates = defaultdict(lambda: deque(maxlen=video_info.fps))
+        
+        with sv.VideoSink(self.target_video_path, self.video_info) as sink:
+            for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
+                now = datetime.now()
+                timestamp = now.timestamp()
+                format_time = now.strftime('%Y-%m-%d %H:%M:%S)')
+                self.frame_number += 1 # 현재 프레임 카운팅
+                
+                # if now.second is not second: # 초당 프레임 진행도 측정
+                #     second = now.second
+                #     print(f"{second}초")
+                #     print(self.frame_number)
+                
+                if result.boxes.id is None: # 검출이 안되면 스킵
+                    continue
+                frame = result.orig_img
+                detections = sv.Detections.from_ultralytics(result)
+                #
+                detections = detections[detections.confidence > 0.3] # 정확도 0.3 이상만
+                detections = detections.with_nms(threshold=0.7) # 
+                detections = self.tracker.update_with_detections(detections=detections)
+                #
 
-            # Annotation 처리
-            annotated_frame = self.annotate_frame(frame, detections)
-            # Output 처리
-            numpy_array = np.array(annotated_frame)
-            # 오버레이 블렌딩 처리
-            # numpy_array = self.overlay.setMix(numpy_array)
-            
-            if numpy_array is not None:
-                self.process.stdin.write(numpy_array.tobytes()) # Output FFmepg
-                cv2.imshow("OpenCV View", numpy_array)
-            
-            if (cv2.waitKey(1) == 27): # ESC > stop
-                break
+                # points = detections.get_anchor_coordinates(
+                #     anchor=sv.Position.CENTER
+                # )
+                # for tracker_id, [_, y] in zip(detections.tracker_id, points):
+                #     self.coordinates[tracker_id].append(y)
+
+                
+                
+                # Tracker id
+                if result.boxes is None or result.boxes.id is None:
+                    detections.tracker_id = result.boxes.id.cpu().numpy().astype(int)
+
+                # Annotation 처리
+                annotated_frame = self.annotate_frame(frame, detections)
+                # Output 처리
+                numpy_array = np.array(annotated_frame)
+                # 오버레이 블렌딩 처리
+                # numpy_array = self.overlay.setMix(numpy_array)
+                
+                if numpy_array is not None:
+                    self.process.stdin.write(numpy_array.tobytes()) # Output FFmepg
+                    cv2.imshow("OpenCV View", numpy_array)
+                
+                if (cv2.waitKey(1) == 27): # ESC > stop
+                    break
 
             
     def annotate_frame(
@@ -178,12 +187,25 @@ class VideoProcessor:
         )
         # 오브젝트 라벨
         labels = [
-            f"{tracker_id} {self.model.names[class_id]} {confidence:0.2f}"
-            # f"{tracker_id} : {self.identity[tracker_id]['speed']}km"
+            # f"{tracker_id} {self.model.names[class_id]} {confidence:0.2f}"
+            # f"{tracker_id} : {self.identity[tracker_id]['speed']}km" if self.identity[tracker_id] and self.identity[tracker_id]['speed'] is not None else f"{tracker_id}"
+            f"{tracker_id} : {self.identity[tracker_id]['speed']}km"
             # f"{self.identity[tracker_id]['id']} : {self.identity[tracker_id]['speed']}km"
             for confidence, class_id, tracker_id
             in zip(detections.confidence, detections.class_id, detections.tracker_id)
         ]
+        
+        # labels = []
+        # for tracker_id in detections.tracker_id:
+        #     if len(self.coordinates[tracker_id]) < self.video_info.fps / 2:
+        #         labels.append(f"#{tracker_id}")
+        #     else:
+        #         coordinate_start = self.coordinates[tracker_id][-1]
+        #         coordinate_end = self.coordinates[tracker_id][0]
+        #         distance = abs(coordinate_start - coordinate_end)
+        #         time = len(self.coordinates[tracker_id]) / self.video_info.fps
+        #         speed = distance / time * 3.6
+        #         labels.append(f"#{tracker_id} {int(speed)} km/h")    
 
         # 프레임 라벨 처리
         annotated_frame = self.label_annotator.annotate(
@@ -208,17 +230,21 @@ class VideoProcessor:
                 }
             else:
                 self.identity[tracker_id]['center_array'].append(center)
-                speed = self.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2])
-                self.identity[tracker_id]['speed'] = speed
+                if len(self.identity[tracker_id]['center_array']) > 8:
+                    speed = self.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-8])
+                    self.identity[tracker_id]['speed'] = speed
+                else:
+                    self.identity[tracker_id]['speed'] = "-"
 
     
     def estimatespeed(self, Location1, Location2):
         location_x = abs(Location2[0] - Location1[0])
         location_y = abs(Location2[1] - Location1[1])
         d_pixel = math.sqrt(math.pow(location_x, 2) + math.pow(location_y, 2))
-        ppm = 4.66 # 1픽셀당 거리계산
-        d_meters = d_pixel/ppm # defining thr pixels per meter
-        speed = d_meters * 8.6 * 3.6 # meter x fps x km
+        ppm = (1/6.66) # 0.15 <-- 현재 고정값 60/9
+        d_meters = d_pixel/(1/ppm) # defining thr pixels per meter
+        # speed = d_meters * 8.6 * 3.6 # meter x fps x km
+        speed = d_meters * 3.6 # meter x fps x km
         return int(speed)
     
     
