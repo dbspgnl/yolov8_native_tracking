@@ -9,7 +9,6 @@ import argparse
 from typing import Dict, List, Set, Tuple
 import math
 from datetime import datetime
-# from collections import defaultdict, deque
 
 COLORS = sv.ColorPalette.from_hex(['#ff8a0d', '#5d9bff', '#7cae01', '#ffeb00']) # car, truck, bus, vehicle
 
@@ -79,10 +78,8 @@ class VideoProcessor:
     ) -> None:
         self.source_video_path = source_video_path
         self.target_video_path = target_video_path
-
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
-        # self.tracker = sv.ByteTrack( frame_rate=60, track_thresh=0.3 )
         
         ffmpeg = FFmpegProcessor(source_video_path, target_video_path)
         self.process = ffmpeg.setPath()
@@ -93,7 +90,6 @@ class VideoProcessor:
         )
         self.bounding_box_annotator = sv.BoundingBoxAnnotator(color=COLORS, thickness=0)
         self.label_annotator = sv.LabelAnnotator(color=COLORS, text_scale=0.35, text_padding=2, color_lookup=sv.ColorLookup.CLASS)
-        # self.overlay = ImageOverlayBlending("1920.png") # 블렌딩 이미지 경로
         self.identity = dict()
         self.frame_number = 0
         self.video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
@@ -121,11 +117,9 @@ class VideoProcessor:
                     continue
                 frame = result.orig_img
                 detections = sv.Detections.from_ultralytics(result)
-                #
                 detections = detections[detections.confidence > 0.3] # 정확도 0.3 이상만
-                detections = detections.with_nms(threshold=0.7) # 
+                detections = detections.with_nms(threshold=0.7) # 비최대 억제 0.7
                 detections = self.tracker.update_with_detections(detections=detections)
-                #
 
                 # points = detections.get_anchor_coordinates(
                 #     anchor=sv.Position.CENTER
@@ -133,8 +127,6 @@ class VideoProcessor:
                 # for tracker_id, [_, y] in zip(detections.tracker_id, points):
                 #     self.coordinates[tracker_id].append(y)
 
-                
-                
                 # Tracker id
                 if result.boxes is None or result.boxes.id is None:
                     detections.tracker_id = result.boxes.id.cpu().numpy().astype(int)
@@ -143,8 +135,6 @@ class VideoProcessor:
                 annotated_frame = self.annotate_frame(frame, detections)
                 # Output 처리
                 numpy_array = np.array(annotated_frame)
-                # 오버레이 블렌딩 처리
-                # numpy_array = self.overlay.setMix(numpy_array)
                 
                 if numpy_array is not None:
                     self.process.stdin.write(numpy_array.tobytes()) # Output FFmepg
@@ -159,14 +149,20 @@ class VideoProcessor:
     ) -> np.ndarray:
         annotated_frame = frame.copy()
         
-        self.set_identity(detections)
-        
         # Detect Area 감지 영역 처리
         detections_in_zones = []
         for zone_in in self.zones_in:
             detections_in_zone = detections[zone_in.trigger(detections=detections)]
             detections_in_zones.append(detections_in_zone)
         detections = sv.Detections.merge(detections_in_zones)
+        
+        # 기록 데이터 삭제 정리
+        for k,v in self.identity.copy().items():
+            if k not in detections.tracker_id:
+                self.identity.pop(k)
+        
+        # 기록 데이터 세팅
+        self.set_identity(detections)
 
         # 영역 테두리 처리
         for i, zone_in in enumerate(self.zones_in):
@@ -188,9 +184,7 @@ class VideoProcessor:
         # 오브젝트 라벨
         labels = [
             # f"{tracker_id} {self.model.names[class_id]} {confidence:0.2f}"
-            # f"{tracker_id} : {self.identity[tracker_id]['speed']}km" if self.identity[tracker_id] and self.identity[tracker_id]['speed'] is not None else f"{tracker_id}"
-            f"{tracker_id} : {self.identity[tracker_id]['speed']}km"
-            # f"{self.identity[tracker_id]['id']} : {self.identity[tracker_id]['speed']}km"
+            f"{self.identity[tracker_id]['id']} : {self.identity[tracker_id]['speed']}km"
             for confidence, class_id, tracker_id
             in zip(detections.confidence, detections.class_id, detections.tracker_id)
         ]
