@@ -9,15 +9,18 @@ import argparse
 from typing import Dict, List, Set, Tuple
 import math
 from datetime import datetime
+from ast import literal_eval
 
-COLORS = sv.ColorPalette.from_hex(['#ff8a0d', '#5d9bff', '#7cae01', '#ffeb00']) # car, truck, bus, vehicle
+car_names = ['car', 'truck', 'bus', 'vehicle'] # 차량 info 종류
+colors_bgr = [[17, 133, 254],[255, 156, 100],[11, 189, 128],[0, 255, 255]] # 차량 info bgr 색상
+car_colors = ['#ff8a0d', '#5d9bff', '#7cae01', '#ffeb00'] # 차량 라벨 색상
+COLORS = sv.ColorPalette.from_hex(car_colors) # car, truck, bus, vehicle
 
-ZONE_IN_POLYGONS = [
-    np.array([
-        [87, 532],[1783, 532],[1783, 812],[87, 812]
-    ])
-]
-
+# ZONE_IN_POLYGONS = [
+#     np.array([
+#         [87, 582],[1783, 582],[1783, 712],[87, 712]
+#     ])
+# ]
 
 def initiate_polygon_zones(
     polygons: List[np.ndarray],
@@ -74,7 +77,8 @@ class VideoProcessor:
         self,
         source_weights_path: str,
         source_video_path: str,
-        target_video_path: str = None,
+        target_video_path: str,
+        zone_in_polygons: str  = None,
     ) -> None:
         self.source_video_path = source_video_path
         self.target_video_path = target_video_path
@@ -85,6 +89,14 @@ class VideoProcessor:
         self.process = ffmpeg.setPath()
         self.width = ffmpeg.getWidth()
         self.height = ffmpeg.getHeight()
+        
+        s = literal_eval(zone_in_polygons)
+        print(">>>>>>>>>>>>>>>>>")
+        print(s)
+        print(type(s))
+        ZONE_IN_POLYGONS = [np.array(s)]
+        # ZONE_IN_POLYGONS = np.array([[87, 582],[1783, 582],[1783, 712],[87, 712]])
+        print(ZONE_IN_POLYGONS[0][0])
         self.zones_in = initiate_polygon_zones(
             ZONE_IN_POLYGONS, (self.width, self.height), sv.Position.CENTER
         )
@@ -94,24 +106,16 @@ class VideoProcessor:
         self.frame_number = 0
         self.video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
         # self.coordinates = defaultdict(lambda: deque(maxlen=self.video_info.fps))
+        self.counting = []
 
+    # 비디오 처리
     def process_video(self): 
-        second = 0
-        # video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
-        # print(video_info.fps)
-        # coordinates = defaultdict(lambda: deque(maxlen=video_info.fps))
-        
         with sv.VideoSink(self.target_video_path, self.video_info) as sink:
             for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
                 now = datetime.now()
                 timestamp = now.timestamp()
                 format_time = now.strftime('%Y-%m-%d %H:%M:%S)')
                 self.frame_number += 1 # 현재 프레임 카운팅
-                
-                # if now.second is not second: # 초당 프레임 진행도 측정
-                #     second = now.second
-                #     print(f"{second}초")
-                #     print(self.frame_number)
                 
                 if result.boxes.id is None: # 검출이 안되면 스킵
                     continue
@@ -121,16 +125,12 @@ class VideoProcessor:
                 detections = detections.with_nms(threshold=0.7) # 비최대 억제 0.7
                 detections = self.tracker.update_with_detections(detections=detections)
 
-                # points = detections.get_anchor_coordinates(
-                #     anchor=sv.Position.CENTER
-                # )
-                # for tracker_id, [_, y] in zip(detections.tracker_id, points):
-                #     self.coordinates[tracker_id].append(y)
+                # points = detections.get_anchor_coordinates(anchor=sv.Position.CENTER) # 센터값 앵커
 
                 # Tracker id
                 if result.boxes is None or result.boxes.id is None:
                     detections.tracker_id = result.boxes.id.cpu().numpy().astype(int)
-
+                    
                 # Annotation 처리
                 annotated_frame = self.annotate_frame(frame, detections)
                 # Output 처리
@@ -143,7 +143,7 @@ class VideoProcessor:
                 if (cv2.waitKey(1) == 27): # ESC > stop
                     break
 
-            
+    # 화면 표기
     def annotate_frame(
         self, frame: np.ndarray, detections: sv.Detections
     ) -> np.ndarray:
@@ -163,6 +163,9 @@ class VideoProcessor:
         
         # 기록 데이터 세팅
         self.set_identity(detections)
+        
+        # 차량 카운팅
+        self.set_counting(detections)
 
         # 영역 테두리 처리
         for i, zone_in in enumerate(self.zones_in):
@@ -183,23 +186,13 @@ class VideoProcessor:
         )
         # 오브젝트 라벨
         labels = [
-            # f"{tracker_id} {self.model.names[class_id]} {confidence:0.2f}"
             f"{self.identity[tracker_id]['id']} : {self.identity[tracker_id]['speed']}km"
             for confidence, class_id, tracker_id
             in zip(detections.confidence, detections.class_id, detections.tracker_id)
         ]
         
-        # labels = []
-        # for tracker_id in detections.tracker_id:
-        #     if len(self.coordinates[tracker_id]) < self.video_info.fps / 2:
-        #         labels.append(f"#{tracker_id}")
-        #     else:
-        #         coordinate_start = self.coordinates[tracker_id][-1]
-        #         coordinate_end = self.coordinates[tracker_id][0]
-        #         distance = abs(coordinate_start - coordinate_end)
-        #         time = len(self.coordinates[tracker_id]) / self.video_info.fps
-        #         speed = distance / time * 3.6
-        #         labels.append(f"#{tracker_id} {int(speed)} km/h")    
+        # 차량 패널 표시
+        self.set_info_panel(annotated_frame)
 
         # 프레임 라벨 처리
         annotated_frame = self.label_annotator.annotate(
@@ -207,6 +200,7 @@ class VideoProcessor:
         )
         return annotated_frame
     
+    # 검출 정보로 JSON 데이터 수집
     def set_identity(self, detections: sv.Detections) -> None:
         for i in range(len(detections.xyxy)):
             xyxy = detections.xyxy[i]
@@ -230,16 +224,42 @@ class VideoProcessor:
                 else:
                     self.identity[tracker_id]['speed'] = "-"
 
-    
+    # 좌표값으로 속도 계산
     def estimatespeed(self, Location1, Location2):
         location_x = abs(Location2[0] - Location1[0])
         location_y = abs(Location2[1] - Location1[1])
         d_pixel = math.sqrt(math.pow(location_x, 2) + math.pow(location_y, 2))
         ppm = (1/6.66) # 0.15 <-- 현재 고정값 60/9
         d_meters = d_pixel/(1/ppm) # defining thr pixels per meter
-        # speed = d_meters * 8.6 * 3.6 # meter x fps x km
         speed = d_meters * 3.6 # meter x fps x km
         return int(speed)
+    
+    
+    # 패널의 차량 수 카운팅
+    def set_counting(self, detections):
+        count = []
+        for i in range(len(car_names)):
+            count.append(0)
+        for id in detections.class_id:
+            count[id] += 1
+        self.counting = count
+        
+    # 패널 info 표시
+    def set_info_panel(self, frame):
+        # 바탕
+        white_color = (255, 255, 255)
+        cv2.rectangle(frame, (self.width-200, 0), (self.width, 120), white_color, -1, cv2.LINE_AA) # 패널 크기 (200, 120)
+        tl = 1 or round(0.002 * (frame.shape[0] + frame.shape[1]) / 2) + 1  # line/font thickness
+        for i in range(len(car_names)):
+            # 글자
+            c1 = (self.width-180, 22 + (i * 28)) # 상단 22부터 시작
+            tf = max(tl - 1, 1)  # font thickness
+            t_size = cv2.getTextSize(car_names[i], 0, fontScale=tl / 3, thickness=tf)[0]
+            cv2.putText(frame, '{} [{}]'.format(car_names[i], self.counting[i]), (c1[0], c1[1] - 2), 0, tl / 3, [0,0,0], thickness=tf, lineType=cv2.LINE_AA)
+            # 색상바
+            cf1 = c1[0] + 100, c1[1]
+            cf2 = cf1[0] + 50, c1[1] - t_size[1] - 3
+            cv2.rectangle(frame, cf1, cf2, colors_bgr[i], -1, cv2.LINE_AA)
     
     
 if __name__ == "__main__":
@@ -258,8 +278,14 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--target_video_path",
-        default=None,
+        required=True,
         help="Path to the target video file (output)",
+        type=str,
+    )
+    parser.add_argument(
+        "--zone_in_polygons",
+        default=None,
+        help="Coordinate array for detection area",
         type=str,
     )
     args = parser.parse_args()
@@ -267,5 +293,6 @@ if __name__ == "__main__":
         source_weights_path=args.source_weights_path,
         source_video_path=args.source_video_path,
         target_video_path=args.target_video_path,
+        zone_in_polygons=args.zone_in_polygons,
     )
     processor.process_video()
