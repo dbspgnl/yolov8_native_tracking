@@ -16,12 +16,6 @@ colors_bgr = [[17, 133, 254],[255, 156, 100],[11, 189, 128],[0, 255, 255]] # 차
 car_colors = ['#ff8a0d', '#5d9bff', '#7cae01', '#ffeb00'] # 차량 라벨 색상
 COLORS = sv.ColorPalette.from_hex(car_colors) # car, truck, bus, vehicle
 
-# ZONE_IN_POLYGONS = [
-#     np.array([
-#         [87, 582],[1783, 582],[1783, 712],[87, 712]
-#     ])
-# ]
-
 def initiate_polygon_zones(
     polygons: List[np.ndarray],
     frame_resolution_wh: Tuple[int, int],
@@ -90,15 +84,8 @@ class VideoProcessor:
         self.width = ffmpeg.getWidth()
         self.height = ffmpeg.getHeight()
         
-        s = literal_eval(zone_in_polygons)
-        print(">>>>>>>>>>>>>>>>>")
-        print(s)
-        print(type(s))
-        ZONE_IN_POLYGONS = [np.array(s)]
-        # ZONE_IN_POLYGONS = np.array([[87, 582],[1783, 582],[1783, 712],[87, 712]])
-        print(ZONE_IN_POLYGONS[0][0])
         self.zones_in = initiate_polygon_zones(
-            ZONE_IN_POLYGONS, (self.width, self.height), sv.Position.CENTER
+            [np.array(literal_eval(zone_in_polygons))], (self.width, self.height), sv.Position.CENTER
         )
         self.bounding_box_annotator = sv.BoundingBoxAnnotator(color=COLORS, thickness=0)
         self.label_annotator = sv.LabelAnnotator(color=COLORS, text_scale=0.35, text_padding=2, color_lookup=sv.ColorLookup.CLASS)
