@@ -73,9 +73,11 @@ class VideoProcessor:
         source_video_path: str,
         target_video_path: str,
         zone_in_polygons: str  = None,
+        is_show: bool = False,
     ) -> None:
         self.source_video_path = source_video_path
         self.target_video_path = target_video_path
+        self.is_show = is_show
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
         
@@ -125,7 +127,8 @@ class VideoProcessor:
                 
                 if numpy_array is not None:
                     self.process.stdin.write(numpy_array.tobytes()) # Output FFmepg
-                    cv2.imshow("OpenCV View", numpy_array)
+                    if self.is_show:
+                        cv2.imshow("OpenCV View", numpy_array)
                 
                 if (cv2.waitKey(1) == 27): # ESC > stop
                     break
@@ -275,11 +278,19 @@ if __name__ == "__main__":
         help="Coordinate array for detection area",
         type=str,
     )
+    parser.add_argument(
+        "--show",
+        default=False,
+        help="OpenCV Show",
+        type=str,
+    )
     args = parser.parse_args()
+    bool_true = (args.show == 'true') # str > bool
     processor = VideoProcessor(
         source_weights_path=args.source_weights_path,
         source_video_path=args.source_video_path,
         target_video_path=args.target_video_path,
         zone_in_polygons=args.zone_in_polygons,
+        is_show=bool_true,
     )
     processor.process_video()
