@@ -10,6 +10,7 @@ from typing import Dict, List, Set, Tuple
 import math
 from datetime import datetime
 from ast import literal_eval
+from tqdm import tqdm
 
 car_names = ['car', 'truck', 'bus', 'vehicle'] # 차량 info 종류
 colors_bgr = [[17, 133, 254],[255, 156, 100],[11, 189, 128],[0, 255, 255]] # 차량 info bgr 색상
@@ -74,41 +75,89 @@ class VideoProcessor:
         target_video_path: str,
         zone_in_polygons: str  = None,
         is_show: bool = False,
+        is_file: bool = False,
     ) -> None:
         self.source_video_path = source_video_path
         self.target_video_path = target_video_path
         self.is_show = is_show
+        self.is_file = is_file
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
         
-        ffmpeg = FFmpegProcessor(source_video_path, target_video_path)
-        self.process = ffmpeg.setPath()
-        self.width = ffmpeg.getWidth()
-        self.height = ffmpeg.getHeight()
-        
-        self.zones_in = initiate_polygon_zones(
-            [np.array(literal_eval(zone_in_polygons))], (self.width, self.height), sv.Position.CENTER
-        )
+        if is_file: # 파일 로직
+            self.video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
+            self.width = self.video_info.width
+            self.height = self.video_info.height
+        else: # 스트림 로직
+            ffmpeg = FFmpegProcessor(source_video_path, target_video_path)
+            self.process = ffmpeg.setPath()
+            self.width = ffmpeg.getWidth()
+            self.height = ffmpeg.getHeight()
+            
+        if not literal_eval(zone_in_polygons): # 전체 영역
+            self.zone_display = False
+            self.zones_in = initiate_polygon_zones(
+                [np.array([[0,0],[self.width,0],[self.width, self.height],[0,self.height]])], (self.width, self.height), sv.Position.CENTER
+            )
+        else: # 지정 영역
+            self.zone_display = True
+            self.zones_in = initiate_polygon_zones(
+                [np.array(literal_eval(zone_in_polygons))], (self.width, self.height), sv.Position.CENTER
+            )
+
         self.bounding_box_annotator = sv.BoundingBoxAnnotator(color=COLORS, thickness=0)
         self.label_annotator = sv.LabelAnnotator(color=COLORS, text_scale=0.35, text_padding=2, color_lookup=sv.ColorLookup.CLASS)
         self.identity = dict()
         self.frame_number = 0
-        self.video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
         # self.coordinates = defaultdict(lambda: deque(maxlen=self.video_info.fps))
         self.counting = []
 
+
     # 비디오 처리
     def process_video(self): 
+        if self.is_file: self.file_process() # file로 로직 처리
+        else: self.stream_process() # rtmp stream으로 처리
+    
+    
+    def file_process(self):
+        frame_generator = sv.get_video_frames_generator(source_path=self.source_video_path)
         with sv.VideoSink(self.target_video_path, self.video_info) as sink:
-            for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
+            for frame in tqdm(frame_generator, total=self.video_info.total_frames):
+                result = self.model(frame, verbose=False, device=0, imgsz=self.video_info.width)[0]
+
                 now = datetime.now()
                 timestamp = now.timestamp()
                 format_time = now.strftime('%Y-%m-%d %H:%M:%S)')
                 self.frame_number += 1 # 현재 프레임 카운팅
                 
+                detections = sv.Detections.from_ultralytics(result)
+                detections = detections[detections.confidence > 0.3] # 정확도 0.3 이상만
+                detections = detections.with_nms(threshold=0.7) # 비최대 억제 0.7
+                detections = self.tracker.update_with_detections(detections=detections)
+
+                # Annotation 처리
+                annotated_frame = self.annotate_frame(frame, detections)
+
+                sink.write_frame(annotated_frame)
+                if self.is_show:
+                    cv2.imshow("OpenCV View", annotated_frame)
+                
+                if (cv2.waitKey(1) == 27): # ESC > stop
+                    break
+
+
+    def stream_process(self):    
+        with sv.VideoSink(self.target_video_path, self.video_info) as sink:
+            for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
                 if result.boxes.id is None: # 검출이 안되면 스킵
                     continue
                 frame = result.orig_img
+
+                now = datetime.now()
+                timestamp = now.timestamp()
+                format_time = now.strftime('%Y-%m-%d %H:%M:%S)')
+                self.frame_number += 1 # 현재 프레임 카운팅
+                
                 detections = sv.Detections.from_ultralytics(result)
                 detections = detections[detections.confidence > 0.3] # 정확도 0.3 이상만
                 detections = detections.with_nms(threshold=0.7) # 비최대 억제 0.7
@@ -132,6 +181,7 @@ class VideoProcessor:
                 
                 if (cv2.waitKey(1) == 27): # ESC > stop
                     break
+
 
     # 화면 표기
     def annotate_frame(
@@ -158,17 +208,18 @@ class VideoProcessor:
         self.set_counting(detections)
 
         # 영역 테두리 처리
-        for i, zone_in in enumerate(self.zones_in):
-            annotated_frame = sv.draw_polygon(
-                annotated_frame, zone_in.polygon, sv.Color.from_hex('#ffffff')
-            )
-            sv.PolygonZoneAnnotator(
-                zone=zone_in,
-                color=sv.Color.from_hex('#ffffff'),
-                thickness=1,
-                text_thickness=1,
-                text_scale=1
-            )
+        if self.zone_display: # 영역 표기 처리일 때만
+            for i, zone_in in enumerate(self.zones_in):
+                annotated_frame = sv.draw_polygon(
+                    annotated_frame, zone_in.polygon, sv.Color.from_hex('#ffffff')
+                )
+                sv.PolygonZoneAnnotator(
+                    zone=zone_in,
+                    color=sv.Color.from_hex('#ffffff'),
+                    thickness=1,
+                    text_thickness=1,
+                    text_scale=1
+                )
             
         # 오브젝트 바운딩 박스
         annotated_frame = self.bounding_box_annotator.annotate(
@@ -284,13 +335,21 @@ if __name__ == "__main__":
         help="OpenCV Show",
         type=str,
     )
+    parser.add_argument(
+        "--file",
+        default=False,
+        help="Make File",
+        type=str,
+    )
     args = parser.parse_args()
-    bool_true = (args.show == 'true') # str > bool
+    show_bool_true = (args.show == 'true') # str > bool
+    file_bool_true = (args.file == 'true') # str > bool
     processor = VideoProcessor(
         source_weights_path=args.source_weights_path,
         source_video_path=args.source_video_path,
         target_video_path=args.target_video_path,
         zone_in_polygons=args.zone_in_polygons,
-        is_show=bool_true,
+        is_show=show_bool_true,
+        is_file=file_bool_true,
     )
     processor.process_video()
