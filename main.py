@@ -40,11 +40,9 @@ class FFmpegProcessor:
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-    def getWidth(self):
-        return self.width
-    
-    def getHeight(self):
-        return self.height
+    def getWidth(self): return self.width
+    def getHeight(self): return self.height
+    def getFPS(self): return self.fps
     
     def setPath(self):
         command = ['ffmpeg',
@@ -88,11 +86,13 @@ class VideoProcessor:
             self.video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
             self.width = self.video_info.width
             self.height = self.video_info.height
+            self.target_fps = round(self.video_info.fps)
         else: # 스트림 로직
             ffmpeg = FFmpegProcessor(source_video_path, target_video_path)
             self.process = ffmpeg.setPath()
             self.width = ffmpeg.getWidth()
             self.height = ffmpeg.getHeight()
+            self.target_fps = 8 #ffmpeg.getFPS() #검출 후 송출하는 영상 pfs 기준 
             
         if not literal_eval(zone_in_polygons): # 전체 영역
             self.zone_display = False
@@ -259,8 +259,8 @@ class VideoProcessor:
                 }
             else:
                 self.identity[tracker_id]['center_array'].append(center)
-                if len(self.identity[tracker_id]['center_array']) > 8:
-                    speed = self.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-8])
+                if len(self.identity[tracker_id]['center_array']) > 2:
+                    speed = self.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2])
                     self.identity[tracker_id]['speed'] = speed
                 else:
                     self.identity[tracker_id]['speed'] = "-"
@@ -270,9 +270,11 @@ class VideoProcessor:
         location_x = abs(Location2[0] - Location1[0])
         location_y = abs(Location2[1] - Location1[1])
         d_pixel = math.sqrt(math.pow(location_x, 2) + math.pow(location_y, 2))
-        ppm = (1/6.66) # 0.15 <-- 현재 고정값 60/9
-        d_meters = d_pixel/(1/ppm) # defining thr pixels per meter
-        speed = d_meters * 3.6 # meter x fps x km
+        # ppm = (1/6.66) # 0.15 <-- 현재 고정값 60/9
+        d_meters = (d_pixel/6.75) # 1080 해상도 거리 160m = 미터당 6.75픽셀
+        # d_meters = d_pixel/(1/ppm) # defining thr pixels per meter
+        # d_meters = d_pixel*ppm # defining thr pixels per meter
+        speed = d_meters * self.target_fps * 3.6 # meter x fps x km
         return int(speed)
     
     
