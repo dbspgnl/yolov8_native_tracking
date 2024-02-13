@@ -11,6 +11,7 @@ import math
 from datetime import datetime
 from ast import literal_eval
 from tqdm import tqdm
+from multiprocessing import freeze_support
 
 car_names = ['car', 'truck', 'bus', 'vehicle'] # 차량 info 종류
 colors_bgr = [[17, 133, 254],[255, 156, 100],[11, 189, 128],[0, 255, 255]] # 차량 info bgr 색상
@@ -82,10 +83,10 @@ class VideoProcessor:
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
         
+        self.video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
+        self.width = self.video_info.width
+        self.height = self.video_info.height
         if is_file: # 파일 로직
-            self.video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
-            self.width = self.video_info.width
-            self.height = self.video_info.height
             self.target_fps = round(self.video_info.fps)
         else: # 스트림 로직
             ffmpeg = FFmpegProcessor(source_video_path, target_video_path)
@@ -232,13 +233,14 @@ class VideoProcessor:
             in zip(detections.confidence, detections.class_id, detections.tracker_id)
         ]
         
-        # 차량 패널 표시
-        self.set_info_panel(annotated_frame)
-
         # 프레임 라벨 처리
         annotated_frame = self.label_annotator.annotate(
             scene=annotated_frame, detections=detections, labels=labels
         )
+        
+        # 차량 패널 표시
+        self.set_info_panel(annotated_frame)
+
         return annotated_frame
     
     # 검출 정보로 JSON 데이터 수집
@@ -306,6 +308,7 @@ class VideoProcessor:
     
     
 if __name__ == "__main__":
+    freeze_support()
     parser = argparse.ArgumentParser(description="Traffic Flow Analysis with YOLOv8")
     parser.add_argument(
         "--source_weights_path",
