@@ -12,6 +12,8 @@ from datetime import datetime
 from ast import literal_eval
 from tqdm import tqdm
 from multiprocessing import freeze_support
+# from supervision.geometry.core import Point
+# from supervision.detection.line_counter import LineZone, LineZoneAnnotator
 
 car_names = ['car', 'truck', 'bus', 'vehicle'] # 차량 info 종류
 colors_bgr = [[17, 133, 254],[255, 156, 100],[11, 189, 128],[0, 255, 255]] # 차량 info bgr 색상
@@ -83,6 +85,11 @@ class VideoProcessor:
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
         
+        LINE_START = sv.Point(30, 770)
+        LINE_END = sv.Point(530, 770)
+        self.line_counter = sv.LineZone(start=LINE_START, end=LINE_END)
+        self.line_annotate = sv.LineZoneAnnotator(color=sv.Color.from_hex('#fc0303'), thickness=1, text_thickness=1, text_scale=0.4)
+        
         self.video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
         self.width = self.video_info.width
         self.height = self.video_info.height
@@ -102,9 +109,14 @@ class VideoProcessor:
             )
         else: # 지정 영역
             self.zone_display = True
+            array = literal_eval(zone_in_polygons)
+            temp_array = []
+            for arr in array:
+                temp_array.append(np.array(arr))
             self.zones_in = initiate_polygon_zones(
-                [np.array(literal_eval(zone_in_polygons))], (self.width, self.height), sv.Position.CENTER
+                temp_array, (self.width, self.height), sv.Position.CENTER
             )
+        self.zone_info = dict({'nows': None, 'sums':[]})
 
         self.bounding_box_annotator = sv.BoundingBoxAnnotator(color=COLORS, thickness=0)
         self.label_annotator = sv.LabelAnnotator(color=COLORS, text_scale=0.35, text_padding=2, color_lookup=sv.ColorLookup.CLASS)
@@ -134,6 +146,7 @@ class VideoProcessor:
                 detections = sv.Detections.from_ultralytics(result)
                 detections = detections[detections.confidence > 0.3] # 정확도 0.3 이상만
                 detections = detections.with_nms(threshold=0.7) # 비최대 억제 0.7
+                detections = self.detect_in_area(detections) # 영역만 디텍팅
                 detections = self.tracker.update_with_detections(detections=detections)
 
                 # Annotation 처리
@@ -162,8 +175,8 @@ class VideoProcessor:
                 detections = sv.Detections.from_ultralytics(result)
                 detections = detections[detections.confidence > 0.3] # 정확도 0.3 이상만
                 detections = detections.with_nms(threshold=0.7) # 비최대 억제 0.7
+                detections = self.detect_in_area(detections) # 영역만 디텍팅
                 detections = self.tracker.update_with_detections(detections=detections)
-
                 # points = detections.get_anchor_coordinates(anchor=sv.Position.CENTER) # 센터값 앵커
 
                 # Tracker id
@@ -182,7 +195,13 @@ class VideoProcessor:
                 
                 if (cv2.waitKey(1) == 27): # ESC > stop
                     break
-
+    def detect_in_area(self, detections: sv.Detections):
+        detections_in_zones = [] # Detect Area 감지 영역 처리
+        self.zone_info['nows'] = [] # 초기화
+        for i, zone_in in enumerate(self.zones_in):
+            detections_in_zone = detections[zone_in.trigger(detections=detections)]
+            detections_in_zones.append(detections_in_zone)
+        return sv.Detections.merge(detections_in_zones)
 
     # 화면 표기
     def annotate_frame(
@@ -190,12 +209,9 @@ class VideoProcessor:
     ) -> np.ndarray:
         annotated_frame = frame.copy()
         
-        # Detect Area 감지 영역 처리
-        detections_in_zones = []
-        for zone_in in self.zones_in:
-            detections_in_zone = detections[zone_in.trigger(detections=detections)]
-            detections_in_zones.append(detections_in_zone)
-        detections = sv.Detections.merge(detections_in_zones)
+        # 라인
+        self.line_counter.trigger(detections=detections)
+        self.line_annotate.annotate(frame=annotated_frame, line_counter=self.line_counter)
         
         # 기록 데이터 삭제 정리
         for k,v in self.identity.copy().items():
@@ -206,7 +222,8 @@ class VideoProcessor:
         self.set_identity(detections)
         
         # 차량 카운팅
-        self.set_counting(detections)
+        # self.set_counting(detections)
+        self.counting = self.set_counting(detections)
 
         # 영역 테두리 처리
         if self.zone_display: # 영역 표기 처리일 때만
@@ -280,14 +297,24 @@ class VideoProcessor:
         return int(speed)
     
     
-    # 패널의 차량 수 카운팅
+    # 차량 수 카운팅
     def set_counting(self, detections):
         count = []
         for i in range(len(car_names)):
             count.append(0)
         for id in detections.class_id:
             count[id] += 1
-        self.counting = count
+        return count
+    
+    # 배열 누적
+    def count_accumulate(self, index, array):
+        if len(self.zone_info['sums']) == 0:
+                self.zone_info['sums'] = self.zone_info['nows']
+        for k,v in enumerate(array):
+            self.zone_info['sums'][index][k] += v
+        # for i in array:
+        #     self.zone_info['sums']
+        # return ''
         
     # 패널 info 표시
     def set_info_panel(self, frame):

@@ -29,3 +29,4 @@ opencv/
 # build / deploy
 dist/
 build/
+*.spec
