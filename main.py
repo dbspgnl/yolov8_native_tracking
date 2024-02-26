@@ -12,8 +12,6 @@ from datetime import datetime
 from ast import literal_eval
 from tqdm import tqdm
 from multiprocessing import freeze_support
-# from supervision.geometry.core import Point
-# from supervision.detection.line_counter import LineZone, LineZoneAnnotator
 
 car_names = ['car', 'truck', 'bus', 'vehicle'] # 차량 info 종류
 colors_bgr = [[17, 133, 254],[255, 156, 100],[11, 189, 128],[0, 255, 255]] # 차량 info bgr 색상
@@ -60,7 +58,6 @@ class FFmpegProcessor:
                 '-pix_fmt', 'yuv420p',
                 '-preset', 'ultrafast',
                 '-sws_flags', 'lanczos',
-                # '-filter:v', 'minterpolate=mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=30',
                 '-filter:v', 'setpts=4.0*PTS',
                 '-r', '30',
                 '-f', 'flv',
@@ -75,24 +72,38 @@ class VideoProcessor:
         source_video_path: str,
         target_video_path: str,
         zone_in_polygons: str  = None,
+        count_line: str  = None,
+        is_count_show: str  = False,
         is_show: bool = False,
         is_file: bool = False,
     ) -> None:
+        # 인자값 설정
         self.source_video_path = source_video_path
         self.target_video_path = target_video_path
         self.is_show = is_show
         self.is_file = is_file
+        self.is_count_show = is_count_show
+        # YOLO 설정
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
-        
-        LINE_START = sv.Point(30, 770)
-        LINE_END = sv.Point(530, 770)
-        self.line_counter = sv.LineZone(start=LINE_START, end=LINE_END)
-        self.line_annotate = sv.LineZoneAnnotator(color=sv.Color.from_hex('#fc0303'), thickness=1, text_thickness=1, text_scale=0.4)
-        
+        # 영상 기본 정보
         self.video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
         self.width = self.video_info.width
         self.height = self.video_info.height
+        # 카운팅 라인 처리
+        self.line_annotate = None 
+        self.line_counters = []
+        if count_line == "": count_line = "[]"    
+        if not not literal_eval(count_line): # 배열이 있으면 처리
+            self.line_annotate = sv.LineZoneAnnotator(color=sv.Color.from_hex('#fc0303'), thickness=1, text_thickness=1, text_scale=0.4)
+            arrays = literal_eval(count_line)
+            for array in arrays:
+                if len(array) == 0: continue
+                LINE_START = sv.Point(array[0][0], array[0][1])
+                LINE_END = sv.Point(array[1][0], array[1][1])
+                points = sv.LineZone(start=LINE_START, end=LINE_END)
+                self.line_counters.append(points)
+        # 로직 분류    
         if is_file: # 파일 로직
             self.target_fps = round(self.video_info.fps)
         else: # 스트림 로직
@@ -101,7 +112,8 @@ class VideoProcessor:
             self.width = ffmpeg.getWidth()
             self.height = ffmpeg.getHeight()
             self.target_fps = 8 #ffmpeg.getFPS() #검출 후 송출하는 영상 pfs 기준 
-            
+        # 영역 처리
+        if zone_in_polygons == "": zone_in_polygons = "[]"    
         if not literal_eval(zone_in_polygons): # 전체 영역
             self.zone_display = False
             self.zones_in = initiate_polygon_zones(
@@ -116,14 +128,13 @@ class VideoProcessor:
             self.zones_in = initiate_polygon_zones(
                 temp_array, (self.width, self.height), sv.Position.CENTER
             )
-        self.zone_info = dict({'nows': None, 'sums':[]})
+        self.zone_info = dict() # 각 영역(zone)에 해당하는 정보
 
         self.bounding_box_annotator = sv.BoundingBoxAnnotator(color=COLORS, thickness=0)
         self.label_annotator = sv.LabelAnnotator(color=COLORS, text_scale=0.35, text_padding=2, color_lookup=sv.ColorLookup.CLASS)
         self.identity = dict()
         self.frame_number = 0
-        # self.coordinates = defaultdict(lambda: deque(maxlen=self.video_info.fps))
-        self.counting = []
+        self.counting = [] # 패널 카운팅
 
 
     # 비디오 처리
@@ -155,9 +166,9 @@ class VideoProcessor:
                 sink.write_frame(annotated_frame)
                 if self.is_show:
                     cv2.imshow("OpenCV View", annotated_frame)
-                
                 if (cv2.waitKey(1) == 27): # ESC > stop
                     break
+            print(self.zone_info)
 
 
     def stream_process(self):    
@@ -176,8 +187,7 @@ class VideoProcessor:
                 detections = detections[detections.confidence > 0.3] # 정확도 0.3 이상만
                 detections = detections.with_nms(threshold=0.7) # 비최대 억제 0.7
                 detections = self.detect_in_area(detections) # 영역만 디텍팅
-                detections = self.tracker.update_with_detections(detections=detections)
-                # points = detections.get_anchor_coordinates(anchor=sv.Position.CENTER) # 센터값 앵커
+                detections = self.tracker.update_with_detections(detections=detections) # 새 번호 발급
 
                 # Tracker id
                 if result.boxes is None or result.boxes.id is None:
@@ -197,21 +207,17 @@ class VideoProcessor:
                     break
     def detect_in_area(self, detections: sv.Detections):
         detections_in_zones = [] # Detect Area 감지 영역 처리
-        self.zone_info['nows'] = [] # 초기화
         for i, zone_in in enumerate(self.zones_in):
             detections_in_zone = detections[zone_in.trigger(detections=detections)]
-            detections_in_zones.append(detections_in_zone)
-        return sv.Detections.merge(detections_in_zones)
+            detections_in_zones.append(detections_in_zone)        
+        detections = sv.Detections.merge(detections_in_zones)
+        return detections
 
     # 화면 표기
     def annotate_frame(
         self, frame: np.ndarray, detections: sv.Detections
     ) -> np.ndarray:
         annotated_frame = frame.copy()
-        
-        # 라인
-        self.line_counter.trigger(detections=detections)
-        self.line_annotate.annotate(frame=annotated_frame, line_counter=self.line_counter)
         
         # 기록 데이터 삭제 정리
         for k,v in self.identity.copy().items():
@@ -222,7 +228,6 @@ class VideoProcessor:
         self.set_identity(detections)
         
         # 차량 카운팅
-        # self.set_counting(detections)
         self.counting = self.set_counting(detections)
 
         # 영역 테두리 처리
@@ -238,6 +243,31 @@ class VideoProcessor:
                     text_thickness=1,
                     text_scale=1
                 )
+
+        # 라인 카운팅
+        if len(self.line_counters) != 0:
+            for i, line_counter in enumerate(self.line_counters):
+                line_counter.trigger(detections=detections)
+                for tracker_id in detections.tracker_id:
+
+                    if tracker_id in line_counter.tracker_state and line_counter.tracker_state[tracker_id] == True:
+                        detections_copy = detections.tracker_id.copy().tolist()
+                        index = detections_copy.index(tracker_id)
+                        class_id = detections.class_id[index]
+                        
+                        if i not in self.zone_info: self.zone_info[i] = {"class_count": {}, "in_count": 0, "out_count": 0, "total_count":0 }
+                        temp_previous_count = self.zone_info[i]["total_count"]
+                        self.zone_info[i]["in_count"] = line_counter.in_count
+                        self.zone_info[i]["out_count"] = line_counter.out_count
+                        self.zone_info[i]["total_count"] = (line_counter.in_count + line_counter.out_count)
+                        
+                        # 카운팅이 존재할 때 클래스 별로 카운팅 처리
+                        if class_id not in self.zone_info[i]["class_count"]: self.zone_info[i]["class_count"][class_id] = 0
+                        if temp_previous_count != self.zone_info[i]["total_count"]:
+                            self.zone_info[i]["class_count"][class_id] +=1
+                        
+                if self.is_count_show: # 카운팅 라벨 표시
+                    self.line_annotate.annotate(frame=annotated_frame, line_counter=line_counter)
             
         # 오브젝트 바운딩 박스
         annotated_frame = self.bounding_box_annotator.annotate(
@@ -289,13 +319,9 @@ class VideoProcessor:
         location_x = abs(Location2[0] - Location1[0])
         location_y = abs(Location2[1] - Location1[1])
         d_pixel = math.sqrt(math.pow(location_x, 2) + math.pow(location_y, 2))
-        # ppm = (1/6.66) # 0.15 <-- 현재 고정값 60/9
         d_meters = (d_pixel/6.75) # 1080 해상도 거리 160m = 미터당 6.75픽셀
-        # d_meters = d_pixel/(1/ppm) # defining thr pixels per meter
-        # d_meters = d_pixel*ppm # defining thr pixels per meter
         speed = d_meters * self.target_fps * 3.6 # meter x fps x km
         return int(speed)
-    
     
     # 차량 수 카운팅
     def set_counting(self, detections):
@@ -305,16 +331,6 @@ class VideoProcessor:
         for id in detections.class_id:
             count[id] += 1
         return count
-    
-    # 배열 누적
-    def count_accumulate(self, index, array):
-        if len(self.zone_info['sums']) == 0:
-                self.zone_info['sums'] = self.zone_info['nows']
-        for k,v in enumerate(array):
-            self.zone_info['sums'][index][k] += v
-        # for i in array:
-        #     self.zone_info['sums']
-        # return ''
         
     # 패널 info 표시
     def set_info_panel(self, frame):
@@ -362,6 +378,18 @@ if __name__ == "__main__":
         type=str,
     )
     parser.add_argument(
+        "--count_line",
+        default=None,
+        help="Line zone coordinates for entry/exit counting processing",
+        type=str,
+    )
+    parser.add_argument(
+        "--count_show",
+        default=False,
+        help="Line zone Count Label Show",
+        type=str,
+    )
+    parser.add_argument(
         "--show",
         default=False,
         help="OpenCV Show",
@@ -374,6 +402,7 @@ if __name__ == "__main__":
         type=str,
     )
     args = parser.parse_args()
+    count_show_bool_true = (args.count_show == 'true') # str > bool
     show_bool_true = (args.show == 'true') # str > bool
     file_bool_true = (args.file == 'true') # str > bool
     processor = VideoProcessor(
@@ -381,6 +410,8 @@ if __name__ == "__main__":
         source_video_path=args.source_video_path,
         target_video_path=args.target_video_path,
         zone_in_polygons=args.zone_in_polygons,
+        count_line=args.count_line,
+        is_count_show=count_show_bool_true,
         is_show=show_bool_true,
         is_file=file_bool_true,
     )
