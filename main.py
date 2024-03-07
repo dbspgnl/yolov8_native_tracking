@@ -8,15 +8,23 @@ import torchvision
 import argparse
 from typing import Dict, List, Set, Tuple
 import math
-from datetime import datetime
 from ast import literal_eval
 from tqdm import tqdm
 from multiprocessing import freeze_support
+from collections import deque
+import threading
+import datetime
 
 car_names = ['car', 'truck', 'bus', 'vehicle'] # 차량 info 종류
 colors_bgr = [[17, 133, 254],[255, 156, 100],[11, 189, 128],[0, 255, 255]] # 차량 info bgr 색상
 car_colors = ['#ff8a0d', '#5d9bff', '#7cae01', '#ffeb00'] # 차량 라벨 색상
 COLORS = sv.ColorPalette.from_hex(car_colors) # car, truck, bus, vehicle
+
+current = datetime.datetime.now()
+Timer = None
+before_frame = 0
+now_frame = 0
+work_frame = 60
 
 def initiate_polygon_zones(
     polygons: List[np.ndarray],
@@ -31,6 +39,13 @@ def initiate_polygon_zones(
         )
         for polygon in polygons
     ]
+
+def current_time(): # 시간 측정 기능
+    global current, Timer, before_frame, now_frame, work_frame
+    work_frame = now_frame - before_frame # 실제 프레임 (작업 프레임) 설정
+    before_frame = now_frame
+    Timer = threading.Timer(1, current_time) # 1초마다 재호출
+    Timer.start() 
 
 
 class FFmpegProcessor:
@@ -58,7 +73,7 @@ class FFmpegProcessor:
                 '-pix_fmt', 'yuv420p',
                 '-preset', 'ultrafast',
                 '-sws_flags', 'lanczos',
-                '-filter:v', 'setpts=4.0*PTS',
+                '-filter:v', 'setpts=2.0*PTS', # 0<점핑, 느림<4
                 '-r', '30',
                 '-f', 'flv',
                 self.target]
@@ -144,15 +159,14 @@ class VideoProcessor:
     
     
     def file_process(self):
+        global now_frame
         frame_generator = sv.get_video_frames_generator(source_path=self.source_video_path)
         with sv.VideoSink(self.target_video_path, self.video_info) as sink:
             for frame in tqdm(frame_generator, total=self.video_info.total_frames):
                 result = self.model(frame, verbose=False, device=0, imgsz=self.video_info.width)[0]
 
-                now = datetime.now()
-                timestamp = now.timestamp()
-                format_time = now.strftime('%Y-%m-%d %H:%M:%S)')
                 self.frame_number += 1 # 현재 프레임 카운팅
+                now_frame = self.frame_number
                 
                 detections = sv.Detections.from_ultralytics(result)
                 detections = detections[detections.confidence > 0.3] # 정확도 0.3 이상만
@@ -172,16 +186,15 @@ class VideoProcessor:
 
 
     def stream_process(self):    
+        global now_frame
         with sv.VideoSink(self.target_video_path, self.video_info) as sink:
             for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
                 if result.boxes.id is None: # 검출이 안되면 스킵
                     continue
                 frame = result.orig_img
 
-                now = datetime.now()
-                timestamp = now.timestamp()
-                format_time = now.strftime('%Y-%m-%d %H:%M:%S)')
                 self.frame_number += 1 # 현재 프레임 카운팅
+                now_frame = self.frame_number
                 
                 detections = sv.Detections.from_ultralytics(result)
                 detections = detections[detections.confidence > 0.3] # 정확도 0.3 이상만
@@ -205,6 +218,8 @@ class VideoProcessor:
                 
                 if (cv2.waitKey(1) == 27): # ESC > stop
                     break
+                
+        
     def detect_in_area(self, detections: sv.Detections):
         detections_in_zones = [] # Detect Area 감지 영역 처리
         for i, zone_in in enumerate(self.zones_in):
@@ -292,6 +307,7 @@ class VideoProcessor:
     
     # 검출 정보로 JSON 데이터 수집
     def set_identity(self, detections: sv.Detections) -> None:
+        global current, before_frame, work_frame
         for i in range(len(detections.xyxy)):
             xyxy = detections.xyxy[i]
             tracker_id = detections.tracker_id[i]
@@ -303,16 +319,22 @@ class VideoProcessor:
                     "position": xyxy,
                     "frame": frame_number,
                     "center": center,
-                    "center_array": [center],
-                    "speed": 0
+                    "center_array": deque(maxlen=5),
+                    "speed": 0,
+                    "start_time": current,
+                    "now_time": current,
                 }
             else:
                 self.identity[tracker_id]['center_array'].append(center)
-                if len(self.identity[tracker_id]['center_array']) > 2:
+                if self.identity[tracker_id]['speed'] == 0 and len(self.identity[tracker_id]['center_array']) > 2: # 속도가 0이면 즉시 속도 계산
                     speed = self.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2])
                     self.identity[tracker_id]['speed'] = speed
-                else:
-                    self.identity[tracker_id]['speed'] = "-"
+                elif self.frame_number > before_frame + work_frame : # 작업 프레임 단위 (영상 1초)마다 아래 갱신
+                    self.identity[tracker_id]['now_time'] = current
+                    if len(self.identity[tracker_id]['center_array']) > 2:
+                        speed = self.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2])
+                        self.identity[tracker_id]['speed'] = speed
+
 
     # 좌표값으로 속도 계산
     def estimatespeed(self, Location1, Location2):
@@ -352,6 +374,7 @@ class VideoProcessor:
     
 if __name__ == "__main__":
     freeze_support()
+    current_time() # 시간 측정 시작
     parser = argparse.ArgumentParser(description="Traffic Flow Analysis with YOLOv8")
     parser.add_argument(
         "--source_weights_path",
@@ -416,3 +439,4 @@ if __name__ == "__main__":
         is_file=file_bool_true,
     )
     processor.process_video()
+    Timer.cancel() # 타임쓰레드 반드시 종료

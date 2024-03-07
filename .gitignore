@@ -30,3 +30,6 @@ opencv/
 dist/
 build/
 *.spec
+
+# test
+*test*.py
