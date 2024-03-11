@@ -163,20 +163,13 @@ class VideoProcessor:
     
     
     def file_process(self):
-        global now_frame
         frame_generator = sv.get_video_frames_generator(source_path=self.source_video_path)
         with sv.VideoSink(self.target_video_path, self.video_info) as sink:
             for frame in tqdm(frame_generator, total=self.video_info.total_frames):
                 result = self.model(frame, verbose=False, device=0, imgsz=self.video_info.width)[0]
-
-                self.frame_number += 1 # 현재 프레임 카운팅
-                now_frame = self.frame_number
                 
-                detections = sv.Detections.from_ultralytics(result)
-                detections = detections[detections.confidence > 0.3] # 정확도 0.3 이상만
-                detections = detections.with_nms(threshold=0.7) # 비최대 억제 0.7
-                detections = self.detect_in_area(detections) # 영역만 디텍팅
-                detections = self.tracker.update_with_detections(detections=detections)
+                # detection 공통 작업: confidence & nms
+                detections = self.common_process(result)
 
                 # Annotation 처리
                 annotated_frame = self.annotate_frame(frame, detections)
@@ -190,21 +183,14 @@ class VideoProcessor:
 
 
     def stream_process(self):    
-        global now_frame
         with sv.VideoSink(self.target_video_path, self.video_info) as sink:
             for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
                 if result.boxes.id is None: # 검출이 안되면 스킵
                     continue
                 frame = result.orig_img
-
-                self.frame_number += 1 # 현재 프레임 카운팅
-                now_frame = self.frame_number
                 
-                detections = sv.Detections.from_ultralytics(result)
-                detections = detections[detections.confidence > 0.3] # 정확도 0.3 이상만
-                detections = detections.with_nms(threshold=0.7) # 비최대 억제 0.7
-                detections = self.detect_in_area(detections) # 영역만 디텍팅
-                detections = self.tracker.update_with_detections(detections=detections) # 새 번호 발급
+                # detection 공통 작업: confidence & nms
+                detections = self.common_process(result)
 
                 # Tracker id
                 if result.boxes is None or result.boxes.id is None:
@@ -223,6 +209,18 @@ class VideoProcessor:
                 if (cv2.waitKey(1) == 27): # ESC > stop
                     break
                 
+                
+    def common_process(self, track):
+        global now_frame
+        self.frame_number += 1 # 현재 프레임 카운팅
+        now_frame = self.frame_number
+        detections = sv.Detections.from_ultralytics(track)
+        detections = detections[detections.confidence > 0.25] 
+        detections = detections.with_nms(threshold=0.3) 
+        detections = self.detect_in_area(detections) # 영역만 디텍팅
+        detections = self.tracker.update_with_detections(detections=detections) # 새 번호 발급
+        return detections
+
         
     def detect_in_area(self, detections: sv.Detections):
         detections_in_zones = [] # Detect Area 감지 영역 처리
@@ -231,6 +229,7 @@ class VideoProcessor:
             detections_in_zones.append(detections_in_zone)        
         detections = sv.Detections.merge(detections_in_zones)
         return detections
+
 
     # 화면 표기
     def annotate_frame(
