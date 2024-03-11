@@ -14,10 +14,12 @@ from multiprocessing import freeze_support
 from collections import deque
 import threading
 import datetime
+from utils.plots_ import plot_one_box2
+
 
 car_names = ['car', 'truck', 'bus', 'vehicle'] # 차량 info 종류
 colors_bgr = [[17, 133, 254],[255, 156, 100],[11, 189, 128],[0, 255, 255]] # 차량 info bgr 색상
-car_colors = ['#ff8a0d', '#5d9bff', '#7cae01', '#ffeb00'] # 차량 라벨 색상
+car_colors = ['#ff911d', '#649af2', '#7eac06', '#fef63c'] # 차량 라벨 색상
 COLORS = sv.ColorPalette.from_hex(car_colors) # car, truck, bus, vehicle
 
 current = datetime.datetime.now()
@@ -146,7 +148,9 @@ class VideoProcessor:
         self.zone_info = dict() # 각 영역(zone)에 해당하는 정보
 
         self.bounding_box_annotator = sv.BoundingBoxAnnotator(color=COLORS, thickness=0)
-        self.label_annotator = sv.LabelAnnotator(color=COLORS, text_scale=0.35, text_padding=2, color_lookup=sv.ColorLookup.CLASS)
+        self.label_annotator = sv.LabelAnnotator(color=COLORS, text_scale=0.35, text_padding=2, 
+            color_lookup=sv.ColorLookup.CLASS, text_color=sv.Color.white()
+        )
         self.identity = dict()
         self.frame_number = 0
         self.counting = [] # 패널 카운팅
@@ -254,7 +258,7 @@ class VideoProcessor:
                 sv.PolygonZoneAnnotator(
                     zone=zone_in,
                     color=sv.Color.from_hex('#ffffff'),
-                    thickness=1,
+                    thickness=0.5,
                     text_thickness=1,
                     text_scale=1
                 )
@@ -283,22 +287,17 @@ class VideoProcessor:
                         
                 if self.is_count_show: # 카운팅 라벨 표시
                     self.line_annotate.annotate(frame=annotated_frame, line_counter=line_counter)
-            
-        # 오브젝트 바운딩 박스
-        annotated_frame = self.bounding_box_annotator.annotate(
-            scene=annotated_frame, detections=detections
-        )
-        # 오브젝트 라벨
-        labels = [
-            f"{self.identity[tracker_id]['id']} : {self.identity[tracker_id]['speed']}km"
-            for confidence, class_id, tracker_id
-            in zip(detections.confidence, detections.class_id, detections.tracker_id)
-        ]
         
-        # 프레임 라벨 처리
-        annotated_frame = self.label_annotator.annotate(
-            scene=annotated_frame, detections=detections, labels=labels
-        )
+        # 차량 라벨
+        for i, detections in enumerate(zip(detections.xyxy, detections.class_id, detections.tracker_id)):
+            plot_one_box2(
+                detections[0], 
+                annotated_frame, 
+                car_names[detections[1]], 
+                label=f"[{self.identity[detections[2]]['id']}] {self.identity[detections[2]]['speed']}km", 
+                color=colors_bgr[detections[1]], 
+                line_thickness=1
+            )
         
         # 차량 패널 표시
         self.set_info_panel(annotated_frame)
@@ -318,6 +317,8 @@ class VideoProcessor:
                     "id": tracker_id,
                     "position": xyxy,
                     "frame": frame_number,
+                    "class": detections.class_id[i],
+                    "class_type": car_names[detections.class_id[i]],
                     "center": center,
                     "center_array": deque(maxlen=5),
                     "speed": 0,
