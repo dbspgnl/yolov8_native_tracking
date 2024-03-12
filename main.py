@@ -146,12 +146,15 @@ class VideoProcessor:
                 temp_array, (self.width, self.height), sv.Position.CENTER
             )
         self.zone_info = dict() # 각 영역(zone)에 해당하는 정보
-
+        # 라벨링
         self.bounding_box_annotator = sv.BoundingBoxAnnotator(color=COLORS, thickness=0)
         self.label_annotator = sv.LabelAnnotator(color=COLORS, text_scale=0.35, text_padding=2, 
             color_lookup=sv.ColorLookup.CLASS, text_color=sv.Color.white()
         )
+        self.trace_annotator = sv.TraceAnnotator(color=COLORS, thickness=2, trace_length=100)
+        # JsonData
         self.identity = dict()
+        self.detected_identity = dict() # 확인된 identity
         self.frame_number = 0
         self.counting = [] # 패널 카운팅
 
@@ -219,6 +222,9 @@ class VideoProcessor:
         detections = detections.with_nms(threshold=0.3) 
         detections = self.detect_in_area(detections) # 영역만 디텍팅
         detections = self.tracker.update_with_detections(detections=detections) # 새 번호 발급
+        # 한 번이라도 감지된 track_id 리스트
+        for tracker_id in detections.tracker_id:
+            self.detected_identity[tracker_id] = self.frame_number
         return detections
 
         
@@ -238,9 +244,9 @@ class VideoProcessor:
         annotated_frame = frame.copy()
         
         # 기록 데이터 삭제 정리
-        for k,v in self.identity.copy().items():
-            if k not in detections.tracker_id:
-                self.identity.pop(k)
+        # for k,v in self.identity.copy().items():
+        #     if k not in detections.tracker_id:
+        #         self.identity.pop(k)
         
         # 기록 데이터 세팅
         self.set_identity(detections)
@@ -287,14 +293,28 @@ class VideoProcessor:
                 if self.is_count_show: # 카운팅 라벨 표시
                     self.line_annotate.annotate(frame=annotated_frame, line_counter=line_counter)
         
+        # 트레이스
+        annotated_frame = self.trace_annotator.annotate(
+            scene=annotated_frame.copy(), detections=detections
+        )
+        
         # 차량 라벨
-        for i, detections in enumerate(zip(detections.xyxy, detections.class_id, detections.tracker_id)):
+        # for i, detections in enumerate(zip(detections.xyxy, detections.class_id, detections.tracker_id)):
+        #     plot_one_box2(
+        #         detections[0], 
+        #         annotated_frame, 
+        #         car_names[detections[1]], 
+        #         label=f"[{self.identity[detections[2]]['id']}] {self.identity[detections[2]]['speed']}km", 
+        #         color=colors_bgr[detections[1]], 
+        #         line_thickness=1
+        #     )
+        for key, val in self.identity.items():
             plot_one_box2(
-                detections[0], 
+                self.identity[key]["position"], 
                 annotated_frame, 
-                car_names[detections[1]], 
-                label=f"[{self.identity[detections[2]]['id']}] {self.identity[detections[2]]['speed']}km", 
-                color=colors_bgr[detections[1]], 
+                self.identity[key]["class_type"], 
+                label=f"[{key}] {self.identity[key]['speed']}km", 
+                color=colors_bgr[self.identity[key]["class"]], 
                 line_thickness=1
             )
         
@@ -306,25 +326,40 @@ class VideoProcessor:
     # 검출 정보로 JSON 데이터 수집
     def set_identity(self, detections: sv.Detections) -> None:
         global current, before_frame, work_frame
+        
+        none_detected_track_ids = list(set(self.detected_identity)-set(detections.tracker_id))
+        # 비검출 데이터 처리
+        for track_id in none_detected_track_ids:
+            xyxy = self.predict_xyxy(self.identity[track_id]['position_array'])
+            self.identity[track_id]['position'] = xyxy
+            
+        
+        # 검출 데이터 처리
         for i in range(len(detections.xyxy)):
             xyxy = detections.xyxy[i]
             tracker_id = detections.tracker_id[i]
             frame_number = self.frame_number
             center = (round((xyxy[0]+xyxy[2])/2, 2), round((xyxy[1]+xyxy[3])/2,2))
+            
             if tracker_id not in self.identity:
                 self.identity[tracker_id] = {
-                    "id": tracker_id,
+                    "id": tracker_id, # 비추적
                     "position": xyxy,
+                    "position_array": deque([xyxy], maxlen=5),
                     "frame": frame_number,
-                    "class": detections.class_id[i],
-                    "class_type": car_names[detections.class_id[i]],
+                    "class": detections.class_id[i], # 비추적
+                    "class_type": car_names[detections.class_id[i]], # 비추적
                     "center": center,
-                    "center_array": deque(maxlen=5),
+                    "center_array": deque([center], maxlen=5),
                     "speed": 0,
-                    "start_time": current,
+                    "start_time": current, # 비추적
                     "now_time": current,
                 }
             else:
+                self.identity[tracker_id]['position'] = xyxy
+                self.identity[tracker_id]['position_array'].append(xyxy)
+                self.identity[tracker_id]['frame'] = frame_number
+                self.identity[tracker_id]['center'] = center
                 self.identity[tracker_id]['center_array'].append(center)
                 if self.identity[tracker_id]['speed'] == 0 and len(self.identity[tracker_id]['center_array']) > 2: # 속도가 0이면 즉시 속도 계산
                     speed = self.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2])
@@ -344,6 +379,16 @@ class VideoProcessor:
         d_meters = (d_pixel/6.75) # 1080 해상도 거리 160m = 미터당 6.75픽셀
         speed = d_meters * self.target_fps * 3.6 # meter x fps x km
         return int(speed)
+    
+    # 이전 좌표 값으로 다음 좌표 값 예측
+    def predict_xyxy(self, xyxy):
+        if len(xyxy) < 2:
+            return xyxy[-1]
+        x1 = abs(xyxy[-1][0] - xyxy[-2][0])
+        y1 = abs(xyxy[-1][1] - xyxy[-2][1])
+        x2 = abs(xyxy[-1][2] - xyxy[-2][2])
+        y2 = abs(xyxy[-1][3] - xyxy[-2][3])
+        return [x1,y1,x2,y2]
     
     # 차량 수 카운팅
     def set_counting(self, detections):
@@ -376,58 +421,18 @@ if __name__ == "__main__":
     freeze_support()
     current_time() # 시간 측정 시작
     parser = argparse.ArgumentParser(description="Traffic Flow Analysis with YOLOv8")
-    parser.add_argument(
-        "--source_weights_path",
-        required=True,
-        help="Path to the source weights file",
-        type=str,
-    )
-    parser.add_argument(
-        "--source_video_path",
-        required=True,
-        help="Path to the source video file",
-        type=str,
-    )
-    parser.add_argument(
-        "--target_video_path",
-        required=True,
-        help="Path to the target video file (output)",
-        type=str,
-    )
-    parser.add_argument(
-        "--zone_in_polygons",
-        default=None,
-        help="Coordinate array for detection area",
-        type=str,
-    )
-    parser.add_argument(
-        "--count_line",
-        default=None,
-        help="Line zone coordinates for entry/exit counting processing",
-        type=str,
-    )
-    parser.add_argument(
-        "--count_show",
-        default=False,
-        help="Line zone Count Label Show",
-        type=str,
-    )
-    parser.add_argument(
-        "--show",
-        default=False,
-        help="OpenCV Show",
-        type=str,
-    )
-    parser.add_argument(
-        "--file",
-        default=False,
-        help="Make File",
-        type=str,
-    )
+    parser.add_argument("--source_weights_path", required=True, type=str, help="Path to the source weights file")
+    parser.add_argument("--source_video_path", required=True, type=str, help="Path to the source video file")
+    parser.add_argument("--target_video_path", required=True, type=str, help="Path to the target video file (output)")
+    parser.add_argument("--zone_in_polygons", default=None, type=str, help="Coordinate array for detection area")
+    parser.add_argument("--count_line", default=None, type=str, help="Line zone coordinates for entry/exit counting processing")
+    parser.add_argument("--count_show", default=False, type=str, help="Line zone Count Label Show")
+    parser.add_argument("--show", default=False, type=str, help="OpenCV Show")
+    parser.add_argument("--file", default=False, type=str, help="Make File")
     args = parser.parse_args()
-    count_show_bool_true = (args.count_show == 'true') # str > bool
-    show_bool_true = (args.show == 'true') # str > bool
-    file_bool_true = (args.file == 'true') # str > bool
+    count_show_bool_true = (args.count_show == 'true')
+    show_bool_true = (args.show == 'true')
+    file_bool_true = (args.file == 'true')
     processor = VideoProcessor(
         source_weights_path=args.source_weights_path,
         source_video_path=args.source_video_path,
