@@ -151,13 +151,12 @@ class VideoProcessor:
         self.label_annotator = sv.LabelAnnotator(color=COLORS, text_scale=0.35, text_padding=2, 
             color_lookup=sv.ColorLookup.CLASS, text_color=sv.Color.white()
         )
-        self.trace_annotator = sv.TraceAnnotator(color=COLORS, thickness=2, trace_length=100)
         # JsonData
         self.identity = dict()
         self.detected_identity = dict() # 확인된 identity
         self.frame_number = 0
         self.counting = [] # 패널 카운팅
-
+        self.twins = [] # 오버레이 데이터 관리
 
     # 비디오 처리
     def process_video(self): 
@@ -222,10 +221,60 @@ class VideoProcessor:
         detections = detections.with_nms(threshold=0.3) 
         detections = self.detect_in_area(detections) # 영역만 디텍팅
         detections = self.tracker.update_with_detections(detections=detections) # 새 번호 발급
-        # 한 번이라도 감지된 track_id 리스트
+        
+        # 기록 데이터 삭제 정리 
+        # for k,v in self.identity.copy().items():
+        #     if k not in detections.tracker_id:
+        #         self.identity.pop(k)
+        
+        # 영역을 넘어가는 데이터는 삭제
+        for k,v in self.identity.copy().items():
+            if self.identity[k]['position'][0] < 0 or self.identity[k]['position'][1] < 0:
+                self.identity.pop(k)
+                self.detected_identity.pop(k)
+            if self.identity[k]['position'][2] > self.width or self.identity[k]['position'][3] > self.height:
+                self.identity.pop(k)
+                self.detected_identity.pop(k)
+        
+        # 기록 데이터 세팅
+        self.set_identity(detections)
+        
+        # 차량 카운팅
+        self.counting = self.set_counting(detections) # ---> todo: detection > json으로 변경
+        
+        # 한 번이라도 감지된 tracker_id 리스트
+        self.twins = [] # 오버레이 감시 초기화
         for tracker_id in detections.tracker_id:
+            if tracker_id not in self.detected_identity: # 신규 데이터 여부
+                if tracker_id not in self.identity:
+                    continue # key 있는 경우에만
+                for key, val in self.identity.copy().items():
+                    if tracker_id != key:
+                        if self.check_overlap(self.identity[tracker_id]["position"], val["position"]) > 0.5: # 오버레이
+                            self.twins.append([tracker_id, key]) # 오버레이 관리
             self.detected_identity[tracker_id] = self.frame_number
         return detections
+    
+    
+    def check_overlap(self, xyxy1: list, xyxy2: list): # 두 좌표의 영역 차이
+        area = self.compute_intersect_area(xyxy1, xyxy2) # 신규 tracker_id의 좌표
+        x, y = xyxy1[2] - xyxy1[0], xyxy1[3] - xyxy1[1]
+        return area/(x*y)
+        
+
+    def compute_intersect_area(self, rect1, rect2):
+        x1, y1, x2, y2 = rect1[0], rect1[1], rect1[2], rect1[3]
+        x3, y3, x4, y4 = rect2[0], rect2[1], rect2[2], rect2[3]
+        # 우좌상하 벗어난 경우
+        if x2 < x3 or x1 > x4 or y2 < y3 or y1 > y4: return 0
+
+        left_up_x, left_up_y = max(x1, x3), max(y1, y3)
+        right_down_x, right_down_y = min(x2, x4), min(y2, y4)
+
+        width = right_down_x - left_up_x
+        height =  right_down_y - left_up_y
+    
+        return width * height
 
         
     def detect_in_area(self, detections: sv.Detections):
@@ -242,17 +291,6 @@ class VideoProcessor:
         self, frame: np.ndarray, detections: sv.Detections
     ) -> np.ndarray:
         annotated_frame = frame.copy()
-        
-        # 기록 데이터 삭제 정리
-        # for k,v in self.identity.copy().items():
-        #     if k not in detections.tracker_id:
-        #         self.identity.pop(k)
-        
-        # 기록 데이터 세팅
-        self.set_identity(detections)
-        
-        # 차량 카운팅
-        self.counting = self.set_counting(detections)
 
         # 영역 테두리 처리
         if self.zone_display: # 영역 표기 처리일 때만
@@ -293,30 +331,29 @@ class VideoProcessor:
                 if self.is_count_show: # 카운팅 라벨 표시
                     self.line_annotate.annotate(frame=annotated_frame, line_counter=line_counter)
         
-        # 트레이스
-        annotated_frame = self.trace_annotator.annotate(
-            scene=annotated_frame.copy(), detections=detections
-        )
-        
         # 차량 라벨
-        # for i, detections in enumerate(zip(detections.xyxy, detections.class_id, detections.tracker_id)):
-        #     plot_one_box2(
-        #         detections[0], 
-        #         annotated_frame, 
-        #         car_names[detections[1]], 
-        #         label=f"[{self.identity[detections[2]]['id']}] {self.identity[detections[2]]['speed']}km", 
-        #         color=colors_bgr[detections[1]], 
-        #         line_thickness=1
-        #     )
+        temp = []
+        for twin in self.twins:
+            temp.append(twin[0])
+            temp.append(twin[1])
         for key, val in self.identity.items():
-            plot_one_box2(
-                self.identity[key]["position"], 
-                annotated_frame, 
-                self.identity[key]["class_type"], 
-                label=f"[{key}] {self.identity[key]['speed']}km", 
-                color=colors_bgr[self.identity[key]["class"]], 
-                line_thickness=1
-            )
+            cant = 0
+            if key in temp: # 오버레이 선별 처리 (겹치는 데이터 중에 선택)
+                for twin in self.twins:
+                    twin_key, twin_val = twin[0], twin[1]
+                    chk1 = self.check_overlap(self.identity[twin_key]["position"], self.identity[key]["position"])
+                    chk2 = self.check_overlap(self.identity[twin_val]["position"], self.identity[key]["position"])
+                    if chk1 > chk2: cant = twin_val
+                    else: cant = twin_key
+            if key != cant:
+                plot_one_box2(
+                    self.identity[key]["position"], 
+                    annotated_frame, 
+                    self.identity[key]["class_type"], 
+                    label=f"[{self.identity[key]['id']}] {self.identity[key]['speed']}km", 
+                    color=colors_bgr[self.identity[key]["class"]], 
+                    line_thickness=1
+                )
         
         # 차량 패널 표시
         self.set_info_panel(annotated_frame)
@@ -327,12 +364,19 @@ class VideoProcessor:
     def set_identity(self, detections: sv.Detections) -> None:
         global current, before_frame, work_frame
         
-        none_detected_track_ids = list(set(self.detected_identity)-set(detections.tracker_id))
+        none_detected_tracker_ids = list(set(self.detected_identity)-set(detections.tracker_id))
         # 비검출 데이터 처리
-        for track_id in none_detected_track_ids:
-            xyxy = self.predict_xyxy(self.identity[track_id]['position_array'])
-            self.identity[track_id]['position'] = xyxy
-            
+        for tracker_id in none_detected_tracker_ids:
+            if tracker_id not in self.identity:
+                continue # key 있는 경우에만
+            xyxy = self.predict_xyxy(xyxy=self.identity[tracker_id]['position_array'], gap=self.identity[tracker_id]['position_gap'])
+            if xyxy[0] < 0: xyxy[0] = 0
+            if xyxy[1] < 0: xyxy[1] = 0
+            if xyxy[2] > self.width: xyxy[2] = self.width
+            if xyxy[3] > self.height: xyxy[3] = self.height
+            self.identity[tracker_id]['position'] = xyxy
+            self.identity[tracker_id]['position_array'].append(xyxy)
+            self.identity[tracker_id]['position_gap'] = self.gap_xyxy(self.identity[tracker_id]['position_array'])
         
         # 검출 데이터 처리
         for i in range(len(detections.xyxy)):
@@ -346,6 +390,7 @@ class VideoProcessor:
                     "id": tracker_id, # 비추적
                     "position": xyxy,
                     "position_array": deque([xyxy], maxlen=5),
+                    "position_gap": [0,0,0,0],
                     "frame": frame_number,
                     "class": detections.class_id[i], # 비추적
                     "class_type": car_names[detections.class_id[i]], # 비추적
@@ -358,6 +403,7 @@ class VideoProcessor:
             else:
                 self.identity[tracker_id]['position'] = xyxy
                 self.identity[tracker_id]['position_array'].append(xyxy)
+                self.identity[tracker_id]['position_gap'] = self.gap_xyxy(self.identity[tracker_id]['position_array'])
                 self.identity[tracker_id]['frame'] = frame_number
                 self.identity[tracker_id]['center'] = center
                 self.identity[tracker_id]['center_array'].append(center)
@@ -381,15 +427,25 @@ class VideoProcessor:
         return int(speed)
     
     # 이전 좌표 값으로 다음 좌표 값 예측
-    def predict_xyxy(self, xyxy):
+    def predict_xyxy(self, xyxy, gap):
         if len(xyxy) < 2:
             return xyxy[-1]
-        x1 = abs(xyxy[-1][0] - xyxy[-2][0])
-        y1 = abs(xyxy[-1][1] - xyxy[-2][1])
-        x2 = abs(xyxy[-1][2] - xyxy[-2][2])
-        y2 = abs(xyxy[-1][3] - xyxy[-2][3])
+        x1 = xyxy[-1][0] + gap[0]
+        y1 = xyxy[-1][1] + gap[1]
+        x2 = xyxy[-1][2] + gap[2]
+        y2 = xyxy[-1][3] + gap[3]
         return [x1,y1,x2,y2]
     
+    # 마지막 좌표까지의 갭 차이
+    def gap_xyxy(self, xyxy):
+        if len(xyxy) < 2:
+            return xyxy[-1]
+        x1 = xyxy[-1][0] - xyxy[-2][0]
+        y1 = xyxy[-1][1] - xyxy[-2][1]
+        x2 = xyxy[-1][2] - xyxy[-2][2]
+        y2 = xyxy[-1][3] - xyxy[-2][3]
+        return [x1,y1,x2,y2]
+        
     # 차량 수 카운팅
     def set_counting(self, detections):
         count = []
