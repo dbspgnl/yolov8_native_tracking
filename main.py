@@ -156,7 +156,7 @@ class VideoProcessor:
         self.detected_identity = dict() # 확인된 identity
         self.frame_number = 0
         self.counting = [] # 패널 카운팅
-        self.twins = [] # 오버레이 데이터 관리
+        self.twins = dict() # 오버레이 관리
 
     # 비디오 처리
     def process_video(self): 
@@ -223,9 +223,10 @@ class VideoProcessor:
         detections = self.tracker.update_with_detections(detections=detections) # 새 번호 발급
         
         # 기록 데이터 삭제 정리 
-        # for k,v in self.identity.copy().items():
-        #     if k not in detections.tracker_id:
-        #         self.identity.pop(k)
+        for k,v in self.identity.copy().items():
+            # if k not in detections.tracker_id:
+            if self.identity[k]["frame"] + 50 < self.frame_number: # 50프레임보다 더 크면 제거
+                self.identity.pop(k)
         
         # 영역을 넘어가는 데이터는 삭제
         for k,v in self.identity.copy().items():
@@ -243,7 +244,6 @@ class VideoProcessor:
         self.counting = self.set_counting(detections) # ---> todo: detection > json으로 변경
         
         # 한 번이라도 감지된 tracker_id 리스트
-        self.twins = [] # 오버레이 감시 초기화
         for tracker_id in detections.tracker_id:
             if tracker_id not in self.detected_identity: # 신규 데이터 여부
                 if tracker_id not in self.identity:
@@ -251,7 +251,8 @@ class VideoProcessor:
                 for key, val in self.identity.copy().items():
                     if tracker_id != key:
                         if self.check_overlap(self.identity[tracker_id]["position"], val["position"]) > 0.5: # 오버레이
-                            self.twins.append([tracker_id, key]) # 오버레이 관리
+                            self.twins[tracker_id] = key # 오버레이 관리 (오버레이 대상끼리 id 동기화 작업)
+                            self.identity[tracker_id]["id"] = key # 해당 id는 추적(target)id로 관리
             self.detected_identity[tracker_id] = self.frame_number
         return detections
     
@@ -331,21 +332,29 @@ class VideoProcessor:
                 if self.is_count_show: # 카운팅 라벨 표시
                     self.line_annotate.annotate(frame=annotated_frame, line_counter=line_counter)
         
-        # 차량 라벨
-        temp = []
-        for twin in self.twins:
-            temp.append(twin[0])
-            temp.append(twin[1])
+        # 오버레이 검사
+        cant = []
         for key, val in self.identity.items():
-            cant = 0
-            if key in temp: # 오버레이 선별 처리 (겹치는 데이터 중에 선택)
-                for twin in self.twins:
-                    twin_key, twin_val = twin[0], twin[1]
-                    chk1 = self.check_overlap(self.identity[twin_key]["position"], self.identity[key]["position"])
-                    chk2 = self.check_overlap(self.identity[twin_val]["position"], self.identity[key]["position"])
-                    if chk1 > chk2: cant = twin_val
-                    else: cant = twin_key
-            if key != cant:
+            if key in self.twins: # 오버레이 선별 처리 (겹치는 데이터 중에 선택)
+                for new, target in self.twins.items():
+                    if new not in self.identity or target not in self.identity:
+                        continue
+                    new_area1 = self.check_overlap(self.identity[new]["position"], self.identity[target]["position"])
+                    new_area2 = self.check_overlap(self.identity[target]["position"], self.identity[target]["position"])
+                    target_area1 = self.check_overlap(self.identity[target]["position"], self.identity[new]["position"])
+                    target_area2 = self.check_overlap(self.identity[new]["position"], self.identity[new]["position"])
+                    chk1 = (new_area1 + new_area2)/2
+                    chk2 = (target_area1 + target_area2)/2
+                    self.identity[new]["overlay"].append(chk1)
+                    self.identity[target]["overlay"].append(chk2)
+                    if chk1 > chk2: cant.append(target)
+                    else: cant.append(new)
+                    
+        # 차량 라벨
+        for key, val in self.identity.items():
+            if key not in cant:
+                # if self.frame_number > 361 and key == 38:
+                #     print(self.frame_number)
                 plot_one_box2(
                     self.identity[key]["position"], 
                     annotated_frame, 
@@ -391,6 +400,8 @@ class VideoProcessor:
                     "position": xyxy,
                     "position_array": deque([xyxy], maxlen=5),
                     "position_gap": [0,0,0,0],
+                    "overlay": deque(maxlen=3),
+                    #"direct": (-1,0),
                     "frame": frame_number,
                     "class": detections.class_id[i], # 비추적
                     "class_type": car_names[detections.class_id[i]], # 비추적
