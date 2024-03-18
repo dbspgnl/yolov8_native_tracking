@@ -223,10 +223,16 @@ class VideoProcessor:
         
         # 기록 데이터 삭제 정리 
         for k,v in self.identity.copy().items():
-            # if k not in detections.tracker_id:
             if self.identity[k]["frame"] + 60 < self.frame_number: # 60프레임보다 더 크면 제거
                 self.identity.pop(k)
-        
+            for zone in self.zones_in: # 감지 영역에 걸치면 제거
+                for line in zone.polygon:
+                    if k not in self.identity:
+                        continue
+                    if self.is_line_over(line, self.identity[k]["center"]):
+                        self.detected_identity.pop(k)
+                        self.identity.pop(k)
+            
         # 기록 데이터 세팅
         self.set_identity(detections)
         
@@ -236,6 +242,7 @@ class VideoProcessor:
         # 한 번이라도 감지된 tracker_id 리스트
         for tracker_id in detections.tracker_id:
             if tracker_id not in self.detected_identity: # 신규 데이터 여부
+                self.detected_identity[tracker_id] = self.frame_number
                 if tracker_id not in self.identity:
                     continue # key 있는 경우에만
                 for key, val in self.identity.copy().items():
@@ -243,7 +250,6 @@ class VideoProcessor:
                         if self.check_overlap(self.identity[tracker_id]["position"], val["position"]) > 0.5: # 오버레이
                             self.twins[tracker_id] = key # 오버레이 관리 (오버레이 대상끼리 id 동기화 작업)
                             self.identity[tracker_id]["id"] = key # 해당 id는 추적(target)id로 관리
-            self.detected_identity[tracker_id] = self.frame_number
         return detections
     
     
@@ -275,7 +281,14 @@ class VideoProcessor:
             detections_in_zones.append(detections_in_zone)        
         detections = sv.Detections.merge(detections_in_zones)
         return detections
+    
 
+    def is_line_over(self, line, xy): # 라인에 걸치는 여부
+        x, y = int(xy[0]), int(xy[1]) 
+        is_x = True if line[0]-2 <= x <=line[0]+2 else False
+        is_y = True if line[1]-2 <= y <=line[1]+2 else False
+        return is_x or is_y
+    
 
     # 화면 표기
     def annotate_frame(
