@@ -223,6 +223,8 @@ class VideoProcessor:
         
         # 기록 데이터 삭제 정리 
         for k,v in self.identity.copy().items():
+            if k not in self.identity:
+                continue
             if self.identity[k]["frame"] + 60 < self.frame_number: # 60프레임보다 더 크면 제거
                 self.identity.pop(k)
             for zone in self.zones_in: # 감지 영역에 걸치면 제거
@@ -232,12 +234,13 @@ class VideoProcessor:
                     if self.is_line_over(line, self.identity[k]["center"]):
                         self.detected_identity.pop(k)
                         self.identity.pop(k)
+                        self.delete_related_id(k)
             
         # 기록 데이터 세팅
         self.set_identity(detections)
         
         # 차량 카운팅
-        self.counting = self.set_counting(detections) # ---> todo: detection > json으로 변경
+        self.counting = self.set_counting()
         
         # 한 번이라도 감지된 tracker_id 리스트
         for tracker_id in detections.tracker_id:
@@ -253,13 +256,13 @@ class VideoProcessor:
         return detections
     
     
-    def check_overlap(self, xyxy1: list, xyxy2: list): # 두 좌표의 영역 차이
+    def check_overlap(self, xyxy1: list, xyxy2: list) -> float: # 두 좌표의 영역 차이
         area = self.compute_intersect_area(xyxy1, xyxy2) # 신규 tracker_id의 좌표
         x, y = xyxy1[2] - xyxy1[0], xyxy1[3] - xyxy1[1]
         return area/(x*y)
         
 
-    def compute_intersect_area(self, rect1, rect2):
+    def compute_intersect_area(self, rect1, rect2) -> float:
         x1, y1, x2, y2 = rect1[0], rect1[1], rect1[2], rect1[3]
         x3, y3, x4, y4 = rect2[0], rect2[1], rect2[2], rect2[3]
         # 우좌상하 벗어난 경우
@@ -274,7 +277,7 @@ class VideoProcessor:
         return width * height
 
         
-    def detect_in_area(self, detections: sv.Detections):
+    def detect_in_area(self, detections: sv.Detections) -> sv.Detections:
         detections_in_zones = [] # Detect Area 감지 영역 처리
         for i, zone_in in enumerate(self.zones_in):
             detections_in_zone = detections[zone_in.trigger(detections=detections)]
@@ -283,12 +286,17 @@ class VideoProcessor:
         return detections
     
 
-    def is_line_over(self, line, xy): # 라인에 걸치는 여부
+    def is_line_over(self, line, xy) -> bool: # 라인에 걸치는 여부
         x, y = int(xy[0]), int(xy[1]) 
         is_x = True if line[0]-2 <= x <=line[0]+2 else False
         is_y = True if line[1]-2 <= y <=line[1]+2 else False
         return is_x or is_y
     
+
+    def delete_related_id(self, id) -> None:
+        for key, val in self.identity.copy().items(): # 해당 id로 되어있는 데이터 제거
+            if val['id'] == id:
+                self.identity.pop(key)
 
     # 화면 표기
     def annotate_frame(
@@ -511,12 +519,10 @@ class VideoProcessor:
         ]
         
     # 차량 수 카운팅
-    def set_counting(self, detections:sv.Detections):
-        count = []
-        for i in range(len(car_names)):
-            count.append(0)
-        for id in detections.class_id:
-            count[id] += 1
+    def set_counting(self) -> list:
+        count = [0 for i in range(len(car_names))]
+        for k,v in self.identity.items():
+            count[v["class"]] += 1
         return count
         
     # 패널 info 표시
