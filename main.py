@@ -41,7 +41,7 @@ def initiate_polygon_zones(
         for polygon in polygons
     ]
 
-def current_time(): # 시간 측정 기능
+def current_time() -> None: # 시간 측정 기능
     global current, Timer, before_frame, now_frame, work_frame
     work_frame = now_frame - before_frame # 실제 프레임 (작업 프레임) 설정
     before_frame = now_frame
@@ -158,12 +158,12 @@ class VideoProcessor:
         self.twins = dict() # 오버레이 관리
 
     # 비디오 처리
-    def process_video(self): 
+    def process_video(self) -> None: 
         if self.is_file: self.file_process() # file로 로직 처리
         else: self.stream_process() # rtmp stream으로 처리
     
     
-    def file_process(self):
+    def file_process(self) -> None:
         frame_generator = sv.get_video_frames_generator(source_path=self.source_video_path)
         with sv.VideoSink(self.target_video_path, self.video_info) as sink:
             for frame in tqdm(frame_generator, total=self.video_info.total_frames):
@@ -183,7 +183,7 @@ class VideoProcessor:
             print(self.zone_info)
 
 
-    def stream_process(self):    
+    def stream_process(self) -> None:    
         with sv.VideoSink(self.target_video_path, self.video_info) as sink:
             for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
                 if result.boxes.id is None: # 검출이 안되면 스킵
@@ -211,7 +211,7 @@ class VideoProcessor:
                     break
                 
                 
-    def common_process(self, track):
+    def common_process(self, track) -> sv.Detections:
         global now_frame
         self.frame_number += 1 # 현재 프레임 카운팅
         now_frame = self.frame_number
@@ -252,7 +252,10 @@ class VideoProcessor:
                     if tracker_id != key:
                         if self.check_overlap(self.identity[tracker_id]["position"], val["position"]) > 0.5: # 오버레이
                             self.twins[tracker_id] = key # 오버레이 관리 (오버레이 대상끼리 id 동기화 작업)
-                            self.identity[tracker_id]["id"] = key # 해당 id는 추적(target)id로 관리
+                            target = self.identity[key] # 해당 id는 추적(target)로 관리
+                            self.identity[tracker_id]["id"] = target["id"] 
+                            self.identity[tracker_id]["class"] = target["class"] # car type number
+                            self.identity[tracker_id]["class_type"] = target["class_type"] # car_name
         return detections
     
     
@@ -429,7 +432,7 @@ class VideoProcessor:
                         self.identity[tracker_id]['speed'] = speed
     
     # 공통 좌표 구하기                    
-    def set_position(self, tracker_id:int, xyxy:list):
+    def set_position(self, tracker_id:int, xyxy:list) -> None:
         # xyxy 최대 범위는 -100 ~ 자기 해상도+100까지
         xyxy[0] = -100 if xyxy[0] < -100 else self.width + 100 if xyxy[0] > self.width + 100 else xyxy[0]
         xyxy[1] = -100 if xyxy[1] < -100 else self.height + 100 if xyxy[1] > self.height + 100 else xyxy[1]
@@ -446,7 +449,7 @@ class VideoProcessor:
 
 
     # 좌표값으로 속도 계산
-    def estimatespeed(self, Location1:list, Location2:list):
+    def estimatespeed(self, Location1:list, Location2:list) -> int:
         location_x = abs(Location2[0] - Location1[0])
         location_y = abs(Location2[1] - Location1[1])
         d_pixel = math.sqrt(math.pow(location_x, 2) + math.pow(location_y, 2))
@@ -455,7 +458,7 @@ class VideoProcessor:
         return int(speed)
     
     # 이전 좌표 값으로 다음 좌표 값 예측
-    def predict_xyxy(self, xyxys:list, gaps:list, direct:tuple):
+    def predict_xyxy(self, xyxys:list, gaps:list, direct:tuple) -> list[int]:
         if len(xyxys) < 2:
             return xyxys[-1]
         trend = "x" if abs(direct[0]) > abs(direct[1]) else "y" 
@@ -465,20 +468,20 @@ class VideoProcessor:
             return [xyxys[-1][0], xyxys[-1][1] + gaps[1], xyxys[-1][2], xyxys[-1][3] + gaps[3]]
     
     # 마지막 좌표까지의 갭 차이
-    def gap_xyxy(self, xyxys:list):
+    def gap_xyxy(self, xyxys:list) -> list[int]:
         if len(xyxys) < 2: return [0,0,0,0]
         elif len(xyxys) == 2: return self.gap(xyxys[-1], xyxys[-2])
         else: return self.gap(xyxys[-1], self.avg_xyxy(xyxys))
         
     # 방향 튜플 구하기 xyxy > (-1,0) 좌측 이동 / (0,1) 하측 이동
-    def direct(self, xyxys:list):
+    def direct(self, xyxys:list) -> tuple:
         if len(xyxys) <= 2:
             return (0,0)
         x1,y1,x2,y2 = self.gap(xyxys[-1], self.avg_xyxy(xyxys))
         return ((x1+x2)/2,(y1+y2)/2)
     
     # 두 개의 좌표 차이
-    def gap(self, xyxy1:list, xyxy2:list): #xyxy1이 더 최근
+    def gap(self, xyxy1:list, xyxy2:list) -> list[int]: #xyxy1이 더 최근
         x1 = xyxy1[0] - xyxy2[0]
         y1 = xyxy1[1] - xyxy2[1]
         x2 = xyxy1[2] - xyxy2[2]
@@ -486,7 +489,7 @@ class VideoProcessor:
         return [x1,y1,x2,y2]
     
     # xyxyx의 누적 평균 좌표 구하기
-    def avg_xyxy(self, xyxys2:list):
+    def avg_xyxy(self, xyxys2:list) -> list[int]:
         xyxys = list(reversed(xyxys2))
         avg_array = [xyxys[0][0],xyxys[0][1],xyxys[0][2],xyxys[0][3]]
         for i in range(len(xyxys)):
@@ -499,7 +502,7 @@ class VideoProcessor:
         return avg_array
     
     # gap 가중 평균
-    def avg_weight_gap(self, xyxys:list):
+    def avg_weight_gap(self, xyxys:list) -> list[int]:
         x1_arr, y1_arr, x2_arr, y2_arr = [], [], [], []
         for xyxy in xyxys:
             x1_arr.append(xyxy[0])
@@ -519,14 +522,14 @@ class VideoProcessor:
         ]
         
     # 차량 수 카운팅
-    def set_counting(self) -> list:
+    def set_counting(self) -> list[int]:
         count = [0 for i in range(len(car_names))]
         for k,v in self.identity.items():
             count[v["class"]] += 1
         return count
         
     # 패널 info 표시
-    def set_info_panel(self, frame: np.ndarray):
+    def set_info_panel(self, frame: np.ndarray) -> None:
         # 바탕
         white_color = (255, 255, 255)
         cv2.rectangle(frame, (self.width-200, 0), (self.width, 120), white_color, -1, cv2.LINE_AA) # 패널 크기 (200, 120)
