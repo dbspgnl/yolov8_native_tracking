@@ -73,8 +73,7 @@ class FFmpegProcessor:
                 '-c:v', 'libx264',
                 '-pix_fmt', 'yuv420p',
                 '-preset', 'ultrafast',
-                '-sws_flags', 'lanczos',
-                '-filter:v', 'setpts=2.0*PTS', # 0<점핑, 느림<4
+                '-filter:v', 'setpts=10.0*PTS', 
                 '-r', '30',
                 '-f', 'flv',
                 self.target]
@@ -221,23 +220,24 @@ class VideoProcessor:
         detections = self.detect_in_area(detections) # 영역만 디텍팅
         detections = self.tracker.update_with_detections(detections=detections) # 새 번호 발급
         
+        # 기록 데이터 세팅
+        self.set_identity(detections)
+        
         # 기록 데이터 삭제 정리 
         for k,v in self.identity.copy().items():
             if k not in self.identity:
                 continue
-            if self.identity[k]["frame"] + 60 < self.frame_number: # 60프레임보다 더 크면 제거
+            if self.identity[k]["frame"] + 5 < self.frame_number: # 5프레임보다 더 크면 제거
                 self.identity.pop(k)
             for zone in self.zones_in: # 감지 영역에 걸치면 제거
                 for line in zone.polygon:
+                    already_del = False
                     if k not in self.identity:
-                        continue
-                    if self.is_line_over(line, self.identity[k]["center"]):
+                        already_del = True
+                    if not already_del and (k in self.detected_identity) and self.is_line_over(line, self.identity[k]["center"]):
                         self.detected_identity.pop(k)
                         self.identity.pop(k)
                         self.delete_related_id(k)
-            
-        # 기록 데이터 세팅
-        self.set_identity(detections)
         
         # 차량 카운팅
         self.counting = self.set_counting()
@@ -291,9 +291,13 @@ class VideoProcessor:
 
     def is_line_over(self, line, xy) -> bool: # 라인에 걸치는 여부
         x, y = int(xy[0]), int(xy[1]) 
-        is_x = True if line[0]-2 <= x <=line[0]+2 else False
-        is_y = True if line[1]-2 <= y <=line[1]+2 else False
-        return is_x or is_y
+        is_x = True if line[0]-2 <= x <=line[0]+2 else False # 선 기준 +-2 두께에 닿으면
+        is_y = True if line[1]-2 <= y <=line[1]+2 else False # 세로도 마찬가지
+        is_min_x = True if 0 < x < 20 else False # 가로 해상도보다 20 작은 범위부터
+        is_max_x = True if self.width-20 < x < self.width else False
+        is_min_y = True if 0 < y < 20 else False # 세로 해상도보다 20 작은 범위부터
+        is_max_y = True if self.height-20 < y < self.height else False
+        return is_x or is_y or is_min_x or is_max_x or is_min_y or is_max_y
     
 
     def delete_related_id(self, id) -> None:
