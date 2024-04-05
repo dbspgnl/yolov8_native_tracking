@@ -50,12 +50,13 @@ def current_time() -> None: # 시간 측정 기능
 
 
 class FFmpegProcessor:
-    def __init__(self, input_path, output_path) -> None:
+    def __init__(self, input_path, output_path, pts:str) -> None:
         self.cap = cv2.VideoCapture(input_path)
         self.target:str = output_path
         self.fps = int(self.cap.get(cv2.CAP_PROP_FPS))
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.pts = pts
         
     def getWidth(self): return self.width
     def getHeight(self): return self.height
@@ -73,7 +74,7 @@ class FFmpegProcessor:
                 '-c:v', 'libx264',
                 '-pix_fmt', 'yuv420p',
                 '-preset', 'ultrafast',
-                '-filter:v', 'setpts=10.0*PTS', 
+                '-filter:v', 'setpts={}*PTS'.format(self.pts), 
                 '-r', '30',
                 '-f', 'flv',
                 self.target]
@@ -91,6 +92,7 @@ class VideoProcessor:
         is_count_show: str  = False,
         is_show: bool = False,
         is_file: bool = False,
+        pts: str = '10.0',
     ) -> None:
         # 인자값 설정
         self.source_video_path = source_video_path
@@ -98,6 +100,7 @@ class VideoProcessor:
         self.is_show = is_show
         self.is_file = is_file
         self.is_count_show = is_count_show
+        self.pts = pts
         # YOLO 설정
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
@@ -122,7 +125,7 @@ class VideoProcessor:
         if is_file: # 파일 로직
             self.target_fps = round(self.video_info.fps)
         else: # 스트림 로직
-            ffmpeg = FFmpegProcessor(source_video_path, target_video_path)
+            ffmpeg = FFmpegProcessor(source_video_path, target_video_path, pts)
             self.process = ffmpeg.setPath()
             self.width = ffmpeg.getWidth()
             self.height = ffmpeg.getHeight()
@@ -562,6 +565,7 @@ if __name__ == "__main__":
     parser.add_argument("--count_show", default=False, type=str, help="Line zone Count Label Show")
     parser.add_argument("--show", default=False, type=str, help="OpenCV Show")
     parser.add_argument("--file", default=False, type=str, help="Make File")
+    parser.add_argument("--pts", default="10.0", type=str, help="FFmpeg PTS set value")
     args = parser.parse_args()
     count_show_bool_true = (args.count_show == 'true')
     show_bool_true = (args.show == 'true')
@@ -575,6 +579,7 @@ if __name__ == "__main__":
         is_count_show=count_show_bool_true,
         is_show=show_bool_true,
         is_file=file_bool_true,
+        pts=args.pts,
     )
     processor.process_video()
     Timer.cancel() # 타임쓰레드 반드시 종료
