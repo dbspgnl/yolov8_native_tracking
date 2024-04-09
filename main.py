@@ -50,13 +50,14 @@ def current_time() -> None: # 시간 측정 기능
 
 
 class FFmpegProcessor:
-    def __init__(self, input_path, output_path, pts:str) -> None:
+    def __init__(self, input_path:str, output_path:str, pts:str, threads:str) -> None:
         self.cap = cv2.VideoCapture(input_path)
         self.target:str = output_path
         self.fps = int(self.cap.get(cv2.CAP_PROP_FPS))
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.pts = pts
+        self.threads = threads
         
     def getWidth(self): return self.width
     def getHeight(self): return self.height
@@ -75,6 +76,7 @@ class FFmpegProcessor:
                 '-pix_fmt', 'yuv420p',
                 '-preset', 'ultrafast',
                 '-filter:v', 'setpts={}*PTS'.format(self.pts), 
+                '-threads', self.threads,
                 '-r', '30',
                 '-f', 'flv',
                 self.target]
@@ -92,7 +94,8 @@ class VideoProcessor:
         is_count_show: str  = False,
         is_show: bool = False,
         is_file: bool = False,
-        pts: str = '10.0',
+        pts: str = '10.0', # 초당 처리 프레임
+        threads: str = '4',
     ) -> None:
         # 인자값 설정
         self.source_video_path = source_video_path
@@ -101,6 +104,7 @@ class VideoProcessor:
         self.is_file = is_file
         self.is_count_show = is_count_show
         self.pts = pts
+        self.threads = threads
         # YOLO 설정
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
@@ -125,7 +129,7 @@ class VideoProcessor:
         if is_file: # 파일 로직
             self.target_fps = round(self.video_info.fps)
         else: # 스트림 로직
-            ffmpeg = FFmpegProcessor(source_video_path, target_video_path, pts)
+            ffmpeg = FFmpegProcessor(source_video_path, target_video_path, pts, threads)
             self.process = ffmpeg.setPath()
             self.width = ffmpeg.getWidth()
             self.height = ffmpeg.getHeight()
@@ -204,10 +208,15 @@ class VideoProcessor:
                 # Output 처리
                 numpy_array = np.array(annotated_frame)
                 
-                if numpy_array is not None:
-                    self.process.stdin.write(numpy_array.tobytes()) # Output FFmepg
-                    if self.is_show:
-                        cv2.imshow("OpenCV View", numpy_array)
+                try: 
+                    if numpy_array is not None:
+                        self.process.stdin.write(numpy_array.tobytes()) # Output FFmepg
+                        if self.is_show:
+                            cv2.imshow("OpenCV View", numpy_array)
+                except Exception as e: # 오류 발생 시 subprocess 종료
+                    print(e) 
+                    self.process.terminate()
+                    break
                 
                 if (cv2.waitKey(1) == 27): # ESC > stop
                     break
@@ -230,7 +239,7 @@ class VideoProcessor:
         for k,v in self.identity.copy().items():
             if k not in self.identity:
                 continue
-            if self.identity[k]["frame"] + 5 < self.frame_number: # 5프레임보다 더 크면 제거
+            if self.identity[k]["frame"] + 2 < self.frame_number: # 3프레임보다 더 크면 제거
                 self.identity.pop(k)
             for zone in self.zones_in: # 감지 영역에 걸치면 제거
                 for line in zone.polygon:
@@ -566,6 +575,7 @@ if __name__ == "__main__":
     parser.add_argument("--show", default=False, type=str, help="OpenCV Show")
     parser.add_argument("--file", default=False, type=str, help="Make File")
     parser.add_argument("--pts", default="10.0", type=str, help="FFmpeg PTS set value")
+    parser.add_argument("--threads", default="4", type=str, help="FFmpeg threads set value")
     args = parser.parse_args()
     count_show_bool_true = (args.count_show == 'true')
     show_bool_true = (args.show == 'true')
@@ -580,6 +590,7 @@ if __name__ == "__main__":
         is_show=show_bool_true,
         is_file=file_bool_true,
         pts=args.pts,
+        threads=args.threads,
     )
     processor.process_video()
     Timer.cancel() # 타임쓰레드 반드시 종료
