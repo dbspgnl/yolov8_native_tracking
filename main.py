@@ -3,8 +3,6 @@ from ultralytics import YOLO
 import supervision as sv
 import numpy as np
 import subprocess
-import torch
-import torchvision
 import argparse
 from typing import Dict, List, Set, Tuple
 import math
@@ -89,13 +87,17 @@ class VideoProcessor:
         source_weights_path: str,
         source_video_path: str,
         target_video_path: str,
-        zone_in_polygons: str  = None,
+        detect_zone_show: bool = False,
+        detect_none_show: bool = False,
+        detect_zone_areas: str  = None,
+        detect_none_areas: str  = None,
         count_line: str  = None,
         is_count_show: str  = False,
         is_show: bool = False,
         is_file: bool = False,
         pts: str = '10.0', # 초당 처리 프레임
-        threads: str = '4',
+        threads: str = '0',
+        keep_frame: str = '4',
     ) -> None:
         # 인자값 설정
         self.source_video_path = source_video_path
@@ -105,6 +107,7 @@ class VideoProcessor:
         self.is_count_show = is_count_show
         self.pts = pts
         self.threads = threads
+        self.keep_frame = int(keep_frame)
         # YOLO 설정
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
@@ -135,21 +138,34 @@ class VideoProcessor:
             self.height = ffmpeg.getHeight()
             self.target_fps = 8 #ffmpeg.getFPS() #검출 후 송출하는 영상 pfs 기준 
         # 영역 처리
-        if zone_in_polygons == "": zone_in_polygons = "[]"    
-        if not literal_eval(zone_in_polygons): # 전체 영역
-            self.zone_display = False
+        self.detect_zone_show = detect_zone_show
+        if detect_zone_areas == "": detect_zone_areas = "[]"    
+        if not literal_eval(detect_zone_areas): # 전체 영역
+            # self.zone_display = False
             self.zones_in = initiate_polygon_zones(
                 [np.array([[0,0],[self.width,0],[self.width, self.height],[0,self.height]])], (self.width, self.height), sv.Position.CENTER
             )
         else: # 지정 영역
-            self.zone_display = True
-            array = literal_eval(zone_in_polygons)
+            # self.zone_display = True
+            array = literal_eval(detect_zone_areas)
             temp_array = []
             for arr in array:
                 temp_array.append(np.array(arr))
             self.zones_in = initiate_polygon_zones(
                 temp_array, (self.width, self.height), sv.Position.CENTER
             )
+        # 비영역 처리
+        self.detect_none_show = detect_none_show
+        if detect_none_areas == "": detect_none_areas = "[]"    
+        if literal_eval(detect_none_areas):
+            array = literal_eval(detect_none_areas)
+            temp_array = []
+            for arr in array:
+                temp_array.append(np.array(arr))
+            self.none_zone_in = initiate_polygon_zones(
+                temp_array, (self.width, self.height), sv.Position.CENTER
+            )
+        
         self.zone_info = dict() # 각 영역(zone)에 해당하는 정보
         # 라벨링
         self.bounding_box_annotator = sv.BoundingBoxAnnotator(color=COLORS, thickness=0)
@@ -173,7 +189,7 @@ class VideoProcessor:
         frame_generator = sv.get_video_frames_generator(source_path=self.source_video_path)
         with sv.VideoSink(self.target_video_path, self.video_info) as sink:
             for frame in tqdm(frame_generator, total=self.video_info.total_frames):
-                result = self.model(frame, verbose=False, device=0, imgsz=self.video_info.width)[0]
+                result = self.model(frame, verbose=False, device=0, imgsz=self.video_info.width, tracker='bytetrack.yaml')[0]
                 
                 # detection 공통 작업: confidence & nms
                 detections = self.common_process(result)
@@ -229,7 +245,7 @@ class VideoProcessor:
         detections = sv.Detections.from_ultralytics(track)
         detections = detections[detections.confidence > 0.25] 
         detections = detections.with_nms(threshold=0.3) 
-        detections = self.detect_in_area(detections) # 영역만 디텍팅
+        detections = self.detect_in_area(detections) # 영역 처리
         detections = self.tracker.update_with_detections(detections=detections) # 새 번호 발급
         
         # 기록 데이터 세팅
@@ -239,7 +255,7 @@ class VideoProcessor:
         for k,v in self.identity.copy().items():
             if k not in self.identity:
                 continue
-            if self.identity[k]["frame"] + 2 < self.frame_number: # 3프레임보다 더 크면 제거
+            if self.identity[k]["frame"] + self.keep_frame < self.frame_number: # 3프레임보다 더 크면 제거
                 self.identity.pop(k)
             for zone in self.zones_in: # 감지 영역에 걸치면 제거
                 for line in zone.polygon:
@@ -292,14 +308,23 @@ class VideoProcessor:
         return width * height
 
         
-    def detect_in_area(self, detections: sv.Detections) -> sv.Detections:
-        detections_in_zones = [] # Detect Area 감지 영역 처리
-        for i, zone_in in enumerate(self.zones_in):
+    def detect_in_area(self, detections: sv.Detections) -> sv.Detections: # Detect Area 감지 영역 처리
+        detections_in_zones = []
+        for i, zone_in in enumerate(self.none_zone_in): # 순회하면서 비감지 영역 인덱스 찾아서 제거
+            mask = zone_in.trigger(detections=detections)
+            detections_in_zone = detections[mask]
+            for xyxy in detections_in_zone.xyxy.tolist():
+                index = detections.xyxy.tolist().index(xyxy)
+                detections.xyxy = np.delete(detections.xyxy, index, 0)
+                detections.confidence = np.delete(detections.confidence, index, 0)
+                detections.class_id = np.delete(detections.class_id, index, 0)
+        for i, zone_in in enumerate(self.zones_in):    
             detections_in_zone = detections[zone_in.trigger(detections=detections)]
-            detections_in_zones.append(detections_in_zone)        
+            detections_in_zones.append(detections_in_zone)
+        
         detections = sv.Detections.merge(detections_in_zones)
-        return detections
-    
+        return detections    
+
 
     def is_line_over(self, line, xy) -> bool: # 라인에 걸치는 여부
         x, y = int(xy[0]), int(xy[1]) 
@@ -324,8 +349,8 @@ class VideoProcessor:
         annotated_frame = frame.copy()
 
         # 영역 테두리 처리
-        if self.zone_display: # 영역 표기 처리일 때만
-            for i, zone_in in enumerate(self.zones_in):
+        if self.detect_zone_show: # 영역 표기 처리일 때만
+            for i, zone_in in enumerate(self.zones_in): # 감지 영역
                 annotated_frame = sv.draw_polygon(
                     annotated_frame, zone_in.polygon, sv.Color.from_hex('#ffffff')
                 )
@@ -333,6 +358,18 @@ class VideoProcessor:
                     zone=zone_in,
                     color=sv.Color.from_hex('#ffffff'),
                     thickness=0.5,
+                    text_thickness=1,
+                    text_scale=1
+                )
+        if self.detect_none_show:
+            for i, zone_in in enumerate(self.none_zone_in): # 비감지 영역
+                annotated_frame = sv.draw_polygon(
+                    annotated_frame, zone_in.polygon, sv.Color.from_hex('#ec4141')
+                )
+                sv.PolygonZoneAnnotator(
+                    zone=zone_in,
+                    color=sv.Color.from_hex('#ec4141'),
+                    thickness=0.1,
                     text_thickness=1,
                     text_scale=1
                 )
@@ -569,14 +606,20 @@ if __name__ == "__main__":
     parser.add_argument("--source_weights_path", required=True, type=str, help="Path to the source weights file")
     parser.add_argument("--source_video_path", required=True, type=str, help="Path to the source video file")
     parser.add_argument("--target_video_path", required=True, type=str, help="Path to the target video file (output)")
-    parser.add_argument("--zone_in_polygons", default=None, type=str, help="Coordinate array for detection area")
+    parser.add_argument("--detect_zone_areas", default=None, type=str, help="Coordinate array for detection area")
+    parser.add_argument("--detect_none_areas", default=None, type=str, help="Coordinate array for non-detection area")
+    parser.add_argument("--detect_zone_show", default=False, type=str, help="detection area Show")
+    parser.add_argument("--detect_none_show", default=False, type=str, help="non-detection Show")
     parser.add_argument("--count_line", default=None, type=str, help="Line zone coordinates for entry/exit counting processing")
     parser.add_argument("--count_show", default=False, type=str, help="Line zone Count Label Show")
     parser.add_argument("--show", default=False, type=str, help="OpenCV Show")
     parser.add_argument("--file", default=False, type=str, help="Make File")
     parser.add_argument("--pts", default="10.0", type=str, help="FFmpeg PTS set value")
-    parser.add_argument("--threads", default="4", type=str, help="FFmpeg threads set value")
+    parser.add_argument("--threads", default="0", type=str, help="FFmpeg threads set value")
+    parser.add_argument("--keep_frame", default="4", type=str, help="How long will the frame be maintained?")
     args = parser.parse_args()
+    detect_zone_show_bool_true = (args.detect_zone_show == 'true')
+    detect_none_show_bool_true = (args.detect_none_show == 'true')
     count_show_bool_true = (args.count_show == 'true')
     show_bool_true = (args.show == 'true')
     file_bool_true = (args.file == 'true')
@@ -584,13 +627,17 @@ if __name__ == "__main__":
         source_weights_path=args.source_weights_path,
         source_video_path=args.source_video_path,
         target_video_path=args.target_video_path,
-        zone_in_polygons=args.zone_in_polygons,
+        detect_zone_areas=args.detect_zone_areas,
+        detect_none_areas=args.detect_none_areas,
+        detect_zone_show=detect_zone_show_bool_true,
+        detect_none_show=detect_none_show_bool_true,
         count_line=args.count_line,
         is_count_show=count_show_bool_true,
         is_show=show_bool_true,
         is_file=file_bool_true,
         pts=args.pts,
         threads=args.threads,
+        keep_frame=args.keep_frame,
     )
     processor.process_video()
     Timer.cancel() # 타임쓰레드 반드시 종료
