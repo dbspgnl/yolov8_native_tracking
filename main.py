@@ -3,9 +3,7 @@ from ultralytics import YOLO
 import supervision as sv
 import numpy as np
 import subprocess
-import argparse
 from typing import Dict, List, Set, Tuple
-import math
 from ast import literal_eval
 from tqdm import tqdm
 from multiprocessing import freeze_support
@@ -13,6 +11,8 @@ from collections import deque
 import threading
 import datetime
 from utils.plots_ import plot_one_box2
+import utils.coord as coord
+import utils.argument as arg
 
 car_names = ['car', 'truck', 'bus', 'vehicle'] # 차량 info 종류
 colors_bgr = [[17, 133, 254],[255, 156, 100],[11, 189, 128],[0, 255, 255]] # 차량 info bgr 색상
@@ -82,34 +82,18 @@ class FFmpegProcessor:
 
 
 class VideoProcessor:
-    def __init__(
-        self,
-        source_weights_path: str,
-        source_video_path: str,
-        target_video_path: str,
-        detect_zone_show: bool = False,
-        detect_none_show: bool = False,
-        detect_zone_areas: str  = None,
-        detect_none_areas: str  = None,
-        count_line: str  = None,
-        is_count_show: str  = False,
-        is_show: bool = False,
-        is_file: bool = False,
-        pts: str = '10.0', # 초당 처리 프레임
-        threads: str = '0',
-        keep_frame: str = '4',
-    ) -> None:
+    def __init__(self, arg: dict) -> None:
         # 인자값 설정
-        self.source_video_path = source_video_path
-        self.target_video_path = target_video_path
-        self.is_show = is_show
-        self.is_file = is_file
-        self.is_count_show = is_count_show
-        self.pts = pts
-        self.threads = threads
-        self.keep_frame = int(keep_frame)
+        self.source_video_path = arg["source_video_path"]
+        self.target_video_path = arg["target_video_path"]
+        self.is_show = arg["is_show"]
+        self.is_file = arg["is_file"]
+        self.is_count_show = arg["is_count_show"]
+        self.pts = arg["pts"]
+        self.threads = arg["threads"]
+        self.keep_frame = int(arg["keep_frame"])
         # YOLO 설정
-        self.model = YOLO(source_weights_path)
+        self.model = YOLO(arg["source_weights_path"])
         self.tracker = sv.ByteTrack()
         # 영상 기본 정보
         self.video_info = sv.VideoInfo.from_video_path(video_path=self.source_video_path)
@@ -118,6 +102,7 @@ class VideoProcessor:
         # 카운팅 라인 처리
         self.line_annotate = None 
         self.line_counters = []
+        count_line = arg["count_line"]
         if count_line == "": count_line = "[]"    
         if not not literal_eval(count_line): # 배열이 있으면 처리
             self.line_annotate = sv.LineZoneAnnotator(color=sv.Color.from_hex('#fc0303'), thickness=1, text_thickness=1, text_scale=0.4)
@@ -129,16 +114,17 @@ class VideoProcessor:
                 points = sv.LineZone(start=LINE_START, end=LINE_END)
                 self.line_counters.append(points)
         # 로직 분류    
-        if is_file: # 파일 로직
+        if arg["is_file"]: # 파일 로직
             self.target_fps = round(self.video_info.fps)
         else: # 스트림 로직
-            ffmpeg = FFmpegProcessor(source_video_path, target_video_path, pts, threads)
+            ffmpeg = FFmpegProcessor(arg["source_video_path"], arg["target_video_path"], arg["pts"], arg["threads"])
             self.process = ffmpeg.setPath()
             self.width = ffmpeg.getWidth()
             self.height = ffmpeg.getHeight()
             self.target_fps = 8 #ffmpeg.getFPS() #검출 후 송출하는 영상 pfs 기준 
         # 영역 처리
-        self.detect_zone_show = detect_zone_show
+        self.detect_zone_show = arg["detect_zone_show"]
+        detect_zone_areas = arg["detect_zone_areas"]
         if detect_zone_areas == "": detect_zone_areas = "[]"    
         if not literal_eval(detect_zone_areas): # 전체 영역
             # self.zone_display = False
@@ -155,7 +141,8 @@ class VideoProcessor:
                 temp_array, (self.width, self.height), sv.Position.CENTER
             )
         # 비영역 처리
-        self.detect_none_show = detect_none_show
+        self.detect_none_show = arg["detect_none_show"]
+        detect_none_areas = arg["detect_none_areas"]
         if detect_none_areas == "": detect_none_areas = "[]"    
         if literal_eval(detect_none_areas):
             array = literal_eval(detect_none_areas)
@@ -262,7 +249,7 @@ class VideoProcessor:
                     already_del = False
                     if k not in self.identity:
                         already_del = True
-                    if not already_del and (k in self.detected_identity) and self.is_line_over(line, self.identity[k]["center"]):
+                    if not already_del and (k in self.detected_identity) and coord.is_line_over(line, self.identity[k]["center"], self.width, self.height):
                         self.detected_identity.pop(k)
                         self.identity.pop(k)
                         self.delete_related_id(k)
@@ -278,7 +265,7 @@ class VideoProcessor:
                     continue # key 있는 경우에만
                 for key, val in self.identity.copy().items():
                     if tracker_id != key:
-                        if self.check_overlap(self.identity[tracker_id]["position"], val["position"]) > 0.5: # 오버레이
+                        if coord.check_overlap(self.identity[tracker_id]["position"], val["position"]) > 0.5: # 오버레이
                             self.twins[tracker_id] = key # 오버레이 관리 (오버레이 대상끼리 id 동기화 작업)
                             target = self.identity[key] # 해당 id는 추적(target)로 관리
                             self.identity[tracker_id]["id"] = target["id"] 
@@ -286,28 +273,7 @@ class VideoProcessor:
                             self.identity[tracker_id]["class_type"] = target["class_type"] # car_name
         return detections
     
-    
-    def check_overlap(self, xyxy1: list, xyxy2: list) -> float: # 두 좌표의 영역 차이
-        area = self.compute_intersect_area(xyxy1, xyxy2) # 신규 tracker_id의 좌표
-        x, y = xyxy1[2] - xyxy1[0], xyxy1[3] - xyxy1[1]
-        return area/(x*y)
-        
 
-    def compute_intersect_area(self, rect1, rect2) -> float:
-        x1, y1, x2, y2 = rect1[0], rect1[1], rect1[2], rect1[3]
-        x3, y3, x4, y4 = rect2[0], rect2[1], rect2[2], rect2[3]
-        # 우좌상하 벗어난 경우
-        if x2 < x3 or x1 > x4 or y2 < y3 or y1 > y4: return 0
-
-        left_up_x, left_up_y = max(x1, x3), max(y1, y3)
-        right_down_x, right_down_y = min(x2, x4), min(y2, y4)
-
-        width = right_down_x - left_up_x
-        height =  right_down_y - left_up_y
-    
-        return width * height
-
-        
     def detect_in_area(self, detections: sv.Detections) -> sv.Detections: # Detect Area 감지 영역 처리
         detections_in_zones = []
         for i, zone_in in enumerate(self.none_zone_in): # 순회하면서 비감지 영역 인덱스 찾아서 제거
@@ -325,17 +291,6 @@ class VideoProcessor:
         detections = sv.Detections.merge(detections_in_zones)
         return detections    
 
-
-    def is_line_over(self, line, xy) -> bool: # 라인에 걸치는 여부
-        x, y = int(xy[0]), int(xy[1]) 
-        is_x = True if line[0]-2 <= x <=line[0]+2 else False # 선 기준 +-2 두께에 닿으면
-        is_y = True if line[1]-2 <= y <=line[1]+2 else False # 세로도 마찬가지
-        is_min_x = True if 0 < x < 20 else False # 가로 해상도보다 20 작은 범위부터
-        is_max_x = True if self.width-20 < x < self.width else False
-        is_min_y = True if 0 < y < 20 else False # 세로 해상도보다 20 작은 범위부터
-        is_max_y = True if self.height-20 < y < self.height else False
-        return is_x or is_y or is_min_x or is_max_x or is_min_y or is_max_y
-    
 
     def delete_related_id(self, id) -> None:
         for key, val in self.identity.copy().items(): # 해당 id로 되어있는 데이터 제거
@@ -406,10 +361,10 @@ class VideoProcessor:
                 for new, target in self.twins.items():
                     if new not in self.identity or target not in self.identity:
                         continue
-                    new_area1 = self.check_overlap(self.identity[new]["position"], self.identity[target]["position"])
-                    new_area2 = self.check_overlap(self.identity[target]["position"], self.identity[target]["position"])
-                    target_area1 = self.check_overlap(self.identity[target]["position"], self.identity[new]["position"])
-                    target_area2 = self.check_overlap(self.identity[new]["position"], self.identity[new]["position"])
+                    new_area1 = coord.check_overlap(self.identity[new]["position"], self.identity[target]["position"])
+                    new_area2 = coord.check_overlap(self.identity[target]["position"], self.identity[target]["position"])
+                    target_area1 = coord.check_overlap(self.identity[target]["position"], self.identity[new]["position"])
+                    target_area2 = coord.check_overlap(self.identity[new]["position"], self.identity[new]["position"])
                     chk1 = (new_area1 + new_area2)/2
                     chk2 = (target_area1 + target_area2)/2
                     self.identity[new]["overlay"].append(chk1)
@@ -442,7 +397,7 @@ class VideoProcessor:
         for tracker_id in none_detected_tracker_ids:
             if tracker_id not in self.identity:
                 continue # key 있는 경우에만
-            xyxy = self.predict_xyxy(
+            xyxy = coord.predict_xyxy(
                 xyxys=self.identity[tracker_id]['position_array'], 
                 gaps=self.identity[tracker_id]['position_gap'],
                 direct=self.identity[tracker_id]['direct']
@@ -476,12 +431,12 @@ class VideoProcessor:
                 self.identity[tracker_id]['frame'] = self.frame_number
                 self.set_position(tracker_id, xyxy)
                 if self.identity[tracker_id]['speed'] == 0 and len(self.identity[tracker_id]['center_array']) > 2: # 속도가 0이면 즉시 속도 계산
-                    speed = self.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2])
+                    speed = coord.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2], self.target_fps)
                     self.identity[tracker_id]['speed'] = speed
                 elif self.frame_number > before_frame + work_frame : # 작업 프레임 단위 (영상 1초)마다 아래 갱신
                     self.identity[tracker_id]['now_time'] = current
                     if len(self.identity[tracker_id]['center_array']) > 2:
-                        speed = self.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2])
+                        speed = coord.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2], self.target_fps)
                         self.identity[tracker_id]['speed'] = speed
     
     # 공통 좌표 구하기                    
@@ -494,85 +449,12 @@ class VideoProcessor:
         center = (round((xyxy[0]+xyxy[2])/2, 2), round((xyxy[1]+xyxy[3])/2,2))
         self.identity[tracker_id]['position'] = xyxy
         self.identity[tracker_id]['position_array'].append(xyxy)
-        self.identity[tracker_id]['position_gap_array'].append(self.gap(self.identity[tracker_id]["position_array"][-1], self.identity[tracker_id]["position_array"][-2]))
-        self.identity[tracker_id]['position_gap'] = self.avg_weight_gap(self.identity[tracker_id]['position_gap_array'])
+        self.identity[tracker_id]['position_gap_array'].append(coord.gap(self.identity[tracker_id]["position_array"][-1], self.identity[tracker_id]["position_array"][-2]))
+        self.identity[tracker_id]['position_gap'] = coord.avg_weight_gap(self.identity[tracker_id]['position_gap_array'])
         self.identity[tracker_id]['center'] = center
         self.identity[tracker_id]['center_array'].append(center)
-        self.identity[tracker_id]['direct'] = self.direct(self.identity[tracker_id]["position_array"]) # 방향
+        self.identity[tracker_id]['direct'] = coord.direct(self.identity[tracker_id]["position_array"]) # 방향
 
-
-    # 좌표값으로 속도 계산
-    def estimatespeed(self, Location1:list, Location2:list) -> int:
-        location_x = abs(Location2[0] - Location1[0])
-        location_y = abs(Location2[1] - Location1[1])
-        d_pixel = math.sqrt(math.pow(location_x, 2) + math.pow(location_y, 2))
-        d_meters = (d_pixel/6.75) # 1080 해상도 거리 160m = 미터당 6.75픽셀
-        speed = d_meters * self.target_fps * 3.6 # meter x fps x km
-        return int(speed)
-    
-    # 이전 좌표 값으로 다음 좌표 값 예측
-    def predict_xyxy(self, xyxys:list, gaps:list, direct:tuple) -> list[int]:
-        if len(xyxys) < 2:
-            return xyxys[-1]
-        trend = "x" if abs(direct[0]) > abs(direct[1]) else "y" 
-        if trend == "x": 
-            return [xyxys[-1][0] + gaps[0], xyxys[-1][1], xyxys[-1][2] + gaps[2], xyxys[-1][3]]
-        elif trend == "y":
-            return [xyxys[-1][0], xyxys[-1][1] + gaps[1], xyxys[-1][2], xyxys[-1][3] + gaps[3]]
-    
-    # 마지막 좌표까지의 갭 차이
-    def gap_xyxy(self, xyxys:list) -> list[int]:
-        if len(xyxys) < 2: return [0,0,0,0]
-        elif len(xyxys) == 2: return self.gap(xyxys[-1], xyxys[-2])
-        else: return self.gap(xyxys[-1], self.avg_xyxy(xyxys))
-        
-    # 방향 튜플 구하기 xyxy > (-1,0) 좌측 이동 / (0,1) 하측 이동
-    def direct(self, xyxys:list) -> tuple:
-        if len(xyxys) <= 2:
-            return (0,0)
-        x1,y1,x2,y2 = self.gap(xyxys[-1], self.avg_xyxy(xyxys))
-        return ((x1+x2)/2,(y1+y2)/2)
-    
-    # 두 개의 좌표 차이
-    def gap(self, xyxy1:list, xyxy2:list) -> list[int]: #xyxy1이 더 최근
-        x1 = xyxy1[0] - xyxy2[0]
-        y1 = xyxy1[1] - xyxy2[1]
-        x2 = xyxy1[2] - xyxy2[2]
-        y2 = xyxy1[3] - xyxy2[3]
-        return [x1,y1,x2,y2]
-    
-    # xyxyx의 누적 평균 좌표 구하기
-    def avg_xyxy(self, xyxys2:list) -> list[int]:
-        xyxys = list(reversed(xyxys2))
-        avg_array = [xyxys[0][0],xyxys[0][1],xyxys[0][2],xyxys[0][3]]
-        for i in range(len(xyxys)):
-            if i > 20: return avg_array
-            xyxy = xyxys[i]
-            avg_array[0] = (avg_array[0] + xyxy[0])/2
-            avg_array[1] = (avg_array[1] + xyxy[1])/2
-            avg_array[2] = (avg_array[2] + xyxy[2])/2
-            avg_array[3] = (avg_array[3] + xyxy[3])/2
-        return avg_array
-    
-    # gap 가중 평균
-    def avg_weight_gap(self, xyxys:list) -> list[int]:
-        x1_arr, y1_arr, x2_arr, y2_arr = [], [], [], []
-        for xyxy in xyxys:
-            x1_arr.append(xyxy[0])
-            y1_arr.append(xyxy[1])
-            x2_arr.append(xyxy[2])
-            y2_arr.append(xyxy[3])
-        weights = [5]
-        for i in range(len(x1_arr)-1):
-            w = 5 - (i+1)
-            if w < 1: w = 1
-            weights.append(w)
-        return [
-            np.average(x1_arr, weights=(weights)), 
-            np.average(y1_arr, weights=(weights)), 
-            np.average(x2_arr, weights=(weights)), 
-            np.average(y2_arr, weights=(weights))
-        ]
         
     # 차량 수 카운팅
     def set_counting(self) -> list[int]:
@@ -602,42 +484,6 @@ class VideoProcessor:
 if __name__ == "__main__":
     freeze_support()
     current_time() # 시간 측정 시작
-    parser = argparse.ArgumentParser(description="Traffic Flow Analysis with YOLOv8")
-    parser.add_argument("--source_weights_path", required=True, type=str, help="Path to the source weights file")
-    parser.add_argument("--source_video_path", required=True, type=str, help="Path to the source video file")
-    parser.add_argument("--target_video_path", required=True, type=str, help="Path to the target video file (output)")
-    parser.add_argument("--detect_zone_areas", default=None, type=str, help="Coordinate array for detection area")
-    parser.add_argument("--detect_none_areas", default=None, type=str, help="Coordinate array for non-detection area")
-    parser.add_argument("--detect_zone_show", default=False, type=str, help="detection area Show")
-    parser.add_argument("--detect_none_show", default=False, type=str, help="non-detection Show")
-    parser.add_argument("--count_line", default=None, type=str, help="Line zone coordinates for entry/exit counting processing")
-    parser.add_argument("--count_show", default=False, type=str, help="Line zone Count Label Show")
-    parser.add_argument("--show", default=False, type=str, help="OpenCV Show")
-    parser.add_argument("--file", default=False, type=str, help="Make File")
-    parser.add_argument("--pts", default="10.0", type=str, help="FFmpeg PTS set value")
-    parser.add_argument("--threads", default="0", type=str, help="FFmpeg threads set value")
-    parser.add_argument("--keep_frame", default="4", type=str, help="How long will the frame be maintained?")
-    args = parser.parse_args()
-    detect_zone_show_bool_true = (args.detect_zone_show == 'true')
-    detect_none_show_bool_true = (args.detect_none_show == 'true')
-    count_show_bool_true = (args.count_show == 'true')
-    show_bool_true = (args.show == 'true')
-    file_bool_true = (args.file == 'true')
-    processor = VideoProcessor(
-        source_weights_path=args.source_weights_path,
-        source_video_path=args.source_video_path,
-        target_video_path=args.target_video_path,
-        detect_zone_areas=args.detect_zone_areas,
-        detect_none_areas=args.detect_none_areas,
-        detect_zone_show=detect_zone_show_bool_true,
-        detect_none_show=detect_none_show_bool_true,
-        count_line=args.count_line,
-        is_count_show=count_show_bool_true,
-        is_show=show_bool_true,
-        is_file=file_bool_true,
-        pts=args.pts,
-        threads=args.threads,
-        keep_frame=args.keep_frame,
-    )
+    processor = VideoProcessor(arg.get_argment())
     processor.process_video()
     Timer.cancel() # 타임쓰레드 반드시 종료
