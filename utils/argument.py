@@ -20,6 +20,7 @@ def get_argment():
     parser.add_argument("--pts", default="10.0", type=str, help="FFmpeg PTS set value")
     parser.add_argument("--threads", default="0", type=str, help="FFmpeg threads set value")
     parser.add_argument("--keep_frame", default="4", type=str, help="How long will the frame be maintained?")
+    parser.add_argument("--xml_output_path", default="result.xml", type=str, help="Where to save the xml file")
     args = parser.parse_args()
     detect_zone_show_bool_true = (args.detect_zone_show == 'true')
     detect_none_show_bool_true = (args.detect_none_show == 'true')
@@ -42,5 +43,6 @@ def get_argment():
         "pts": args.pts,
         "threads": args.threads,
         "keep_frame": args.keep_frame,
+        "xml_output_path": args.xml_output_path,
     }
     

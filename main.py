@@ -2,28 +2,22 @@ import cv2
 from ultralytics import YOLO
 import supervision as sv
 import numpy as np
-import subprocess
-from typing import Dict, List, Set, Tuple
+from typing import List, Tuple
 from ast import literal_eval
 from tqdm import tqdm
 from multiprocessing import freeze_support
 from collections import deque
-import threading
-import datetime
 from utils.plots_ import plot_one_box2
 import utils.coord as coord
 import utils.argument as arg
+from utils.ffmpeg import FFmpegProcessor
+import utils.timer as timer
+from utils.xml import XML
 
 car_names = ['car', 'truck', 'bus', 'vehicle'] # 차량 info 종류
 colors_bgr = [[17, 133, 254],[255, 156, 100],[11, 189, 128],[0, 255, 255]] # 차량 info bgr 색상
 car_colors = ['#ff911d', '#649af2', '#7eac06', '#fef63c'] # 차량 라벨 색상
 COLORS = sv.ColorPalette.from_hex(car_colors) # car, truck, bus, vehicle
-
-current = datetime.datetime.now()
-Timer = None
-before_frame = 0
-now_frame = 0
-work_frame = 60
 
 def initiate_polygon_zones(
     polygons: List[np.ndarray],
@@ -38,48 +32,6 @@ def initiate_polygon_zones(
         )
         for polygon in polygons
     ]
-
-def current_time() -> None: # 시간 측정 기능
-    global current, Timer, before_frame, now_frame, work_frame
-    work_frame = now_frame - before_frame # 실제 프레임 (작업 프레임) 설정
-    before_frame = now_frame
-    Timer = threading.Timer(1, current_time) # 1초마다 재호출
-    Timer.start() 
-
-
-class FFmpegProcessor:
-    def __init__(self, input_path:str, output_path:str, pts:str, threads:str) -> None:
-        self.cap = cv2.VideoCapture(input_path)
-        self.target:str = output_path
-        self.fps = int(self.cap.get(cv2.CAP_PROP_FPS))
-        self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.pts = pts
-        self.threads = threads
-        
-    def getWidth(self): return self.width
-    def getHeight(self): return self.height
-    def getFPS(self): return self.fps
-    
-    def setPath(self):
-        command = ['ffmpeg',
-                '-y',
-                '-f', 'rawvideo',
-                '-vcodec', 'rawvideo',
-                '-pix_fmt', 'bgr24',
-                '-s', "{}x{}".format(self.width, self.height),
-                '-r', str(self.fps),
-                '-i', '-',
-                '-c:v', 'libx264',
-                '-pix_fmt', 'yuv420p',
-                '-preset', 'ultrafast',
-                '-filter:v', 'setpts={}*PTS'.format(self.pts), 
-                '-threads', self.threads,
-                '-r', '30',
-                '-f', 'flv',
-                self.target]
-        return subprocess.Popen(command, stdin=subprocess.PIPE)
-
 
 class VideoProcessor:
     def __init__(self, arg: dict) -> None:
@@ -165,6 +117,8 @@ class VideoProcessor:
         self.frame_number = 0
         self.counting = [] # 패널 카운팅
         self.twins = dict() # 오버레이 관리
+        # xml
+        self.xml = XML(outPath=arg["xml_output_path"])
 
     # 비디오 처리
     def process_video(self) -> None: 
@@ -190,6 +144,7 @@ class VideoProcessor:
                 if (cv2.waitKey(1) == 27): # ESC > stop
                     break
             print(self.zone_info)
+        self.xml.make_xml()
 
 
     def stream_process(self) -> None:    
@@ -253,6 +208,10 @@ class VideoProcessor:
                         self.detected_identity.pop(k)
                         self.identity.pop(k)
                         self.delete_related_id(k)
+            # 처리 후 xml 파일로 저장
+            if self.is_file:
+                position = " ".join([str(int(v["position"][0])), str(int(v["position"][1])), str(int(v["position"][2])), str(int(v["position"][3]))])
+                self.xml.save_data({"card": v["id"], "now_frame": v["frame"], "class": v["class_type"], "position": position})
         
         # 차량 카운팅
         self.counting = self.set_counting()
@@ -391,7 +350,6 @@ class VideoProcessor:
     
     # 검출 정보로 JSON 데이터 수집
     def set_identity(self, detections: sv.Detections) -> None:
-        global current, before_frame, work_frame
         none_detected_tracker_ids = list(set(self.detected_identity)-set(detections.tracker_id))
         # 비검출 데이터 처리
         for tracker_id in none_detected_tracker_ids:
@@ -424,8 +382,8 @@ class VideoProcessor:
                     "center": center,
                     "center_array": deque([center], maxlen=20),
                     "speed": 0,
-                    "start_time": current, # 비추적
-                    "now_time": current,
+                    "start_time": timer.current, # 비추적
+                    "now_time": timer.current,
                 }
             else:
                 self.identity[tracker_id]['frame'] = self.frame_number
@@ -433,8 +391,8 @@ class VideoProcessor:
                 if self.identity[tracker_id]['speed'] == 0 and len(self.identity[tracker_id]['center_array']) > 2: # 속도가 0이면 즉시 속도 계산
                     speed = coord.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2], self.target_fps)
                     self.identity[tracker_id]['speed'] = speed
-                elif self.frame_number > before_frame + work_frame : # 작업 프레임 단위 (영상 1초)마다 아래 갱신
-                    self.identity[tracker_id]['now_time'] = current
+                elif self.frame_number > timer.before_frame + timer.work_frame : # 작업 프레임 단위 (영상 1초)마다 아래 갱신
+                    self.identity[tracker_id]['now_time'] = timer.current
                     if len(self.identity[tracker_id]['center_array']) > 2:
                         speed = coord.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2], self.target_fps)
                         self.identity[tracker_id]['speed'] = speed
@@ -480,10 +438,9 @@ class VideoProcessor:
             cf2 = cf1[0] + 50, c1[1] - t_size[1] - 3
             cv2.rectangle(frame, cf1, cf2, colors_bgr[i], -1, cv2.LINE_AA)
     
-    
 if __name__ == "__main__":
     freeze_support()
-    current_time() # 시간 측정 시작
+    timer.current_time() # 시간 측정 시작
     processor = VideoProcessor(arg.get_argment())
     processor.process_video()
-    Timer.cancel() # 타임쓰레드 반드시 종료
+    timer.Timer.cancel() # 타임쓰레드 반드시 종료
