@@ -19,6 +19,8 @@ colors_bgr = [[17, 133, 254],[255, 156, 100],[11, 189, 128],[0, 255, 255]] # 차
 car_colors = ['#ff911d', '#649af2', '#7eac06', '#fef63c'] # 차량 라벨 색상
 COLORS = sv.ColorPalette.from_hex(car_colors) # car, truck, bus, vehicle
 
+
+# 영역 처리 함수 : 감지 및 비감지 영역 지정 함수
 def initiate_polygon_zones(
     polygons: List[np.ndarray],
     frame_resolution_wh: Tuple[int, int],
@@ -33,6 +35,30 @@ def initiate_polygon_zones(
         for polygon in polygons
     ]
 
+def set_padding(width: int, height: int, padding: int) -> List[np.ndarray]:
+    padding_polygons = []
+    if padding > 0:
+        w = width
+        h = height
+        p = padding
+        padding_polygons = [
+            np.array([[0, 0], [p, 0], [p, h], [0, h]]),  # Left padding
+            np.array([[0, 0], [w, 0], [w, p], [0, p]]),  # Top padding
+            np.array([[w, 0], [w, h], [w - p, h], [w - p, 0]]),  # Right padding
+            np.array([[w, h], [0, h], [0, h - p], [w, h - p]])  # Bottom padding
+        ]
+    return padding_polygons
+        
+'''
+__init__ : 입력 및 출력, YOLO모델, Tracker, video, 영역 등 초기화 / 카운팅 라인 및 검출 영역 설정
+process_video : 비디오 처리 진입점 / 파일기반 처리 OR 스트림 기반 처리 (파일기반:file_process / 실시간기반:stream_process)
+file_process: 비디오 파일을 프레임 단위로 처리, 1) Detection 공통작업(common_process) / 2) Annotation 처리된 영상 저장 / 3) xml file에 savedJson의 데이터를 저장 
+common_process: 1. 현재 프레임 카운팅 / 2. 기록 데이터 세팅 (set_identity - 검출정보를 savedJson에 JSON 형태로 저장)/
+set_identity : Detections 데이터를 받아서 1. 비검출된 차량 예측 / 2. 검출 데이터 처리 / 3. 해당 데이터들을 "set_position"으로 self.identity에 전달
+set_position : 1. 좌표값이 자기 해상도를 넘어가지 않도록 값을 변경 / 2. self.identity에 검출 데이터 전달
+
+'''
+
 class VideoProcessor:
     def __init__(self, arg: dict) -> None:
         # 인자값 설정
@@ -44,6 +70,7 @@ class VideoProcessor:
         self.pts = arg["pts"]
         self.threads = arg["threads"]
         self.keep_frame = int(arg["keep_frame"])
+        self.tracker_yaml = arg["tracker_yaml"]
         # YOLO 설정
         self.model = YOLO(arg["source_weights_path"])
         self.tracker = sv.ByteTrack()
@@ -103,7 +130,16 @@ class VideoProcessor:
                 temp_array.append(np.array(arr))
             self.none_zone_in = initiate_polygon_zones(
                 temp_array, (self.width, self.height), sv.Position.CENTER
-            )
+            )   
+        # 패딩 설정
+        padding = arg["padding"]
+        padding_polygons = set_padding(self.width, self.height, padding)
+        for polygon in padding_polygons:
+            self.none_zone_in.append(sv.PolygonZone(
+                polygon=polygon,
+                frame_resolution_wh=(self.width, self.height),
+                triggering_position=sv.Position.CENTER
+            ))
         
         self.zone_info = dict() # 각 영역(zone)에 해당하는 정보
         # 라벨링
@@ -112,6 +148,7 @@ class VideoProcessor:
             color_lookup=sv.ColorLookup.CLASS, text_color=sv.Color.white()
         )
         # JsonData
+        self.none_zone_ids = set()
         self.identity = dict()
         self.detected_identity = dict() # 확인된 identity
         self.frame_number = 0
@@ -130,12 +167,12 @@ class VideoProcessor:
         frame_generator = sv.get_video_frames_generator(source_path=self.source_video_path)
         with sv.VideoSink(self.target_video_path, self.video_info) as sink:
             for frame in tqdm(frame_generator, total=self.video_info.total_frames):
-                result = self.model(frame, verbose=False, device=0, imgsz=self.video_info.width, tracker='bytetrack.yaml')[0]
+                result = self.model(frame, verbose=False, device=0, imgsz=self.video_info.width, tracker=self.tracker_yaml)[0]
                 
                 # detection 공통 작업: confidence & nms
                 detections = self.common_process(result)
 
-                # Annotation 처리
+                # Annotation 처리 - frame에 Annotation을 적용함
                 annotated_frame = self.annotate_frame(frame, detections)
 
                 sink.write_frame(annotated_frame)
@@ -182,34 +219,42 @@ class VideoProcessor:
                 
     def common_process(self, track) -> sv.Detections:
         global now_frame
-        self.frame_number += 1 # 현재 프레임 카운팅
+        self.frame_number += 1 # 현재 프레임 카운팅 - 최초등장 프레임 데이터 필요
         now_frame = self.frame_number
         detections = sv.Detections.from_ultralytics(track)
         detections = detections[detections.confidence > 0.25] 
         detections = detections.with_nms(threshold=0.3) 
-        detections = self.detect_in_area(detections) # 영역 처리
         detections = self.tracker.update_with_detections(detections=detections) # 새 번호 발급
+        detections = self.detect_in_area(detections) # 영역 처리
         
         # 기록 데이터 세팅
         self.set_identity(detections)
         
         # 기록 데이터 삭제 정리 
-        for k,v in self.identity.copy().items():
-            if k not in self.identity:
-                continue
-            if self.identity[k]["frame"] + self.keep_frame < self.frame_number: # 3프레임보다 더 크면 제거
+        for k, v in list(self.identity.items()):  # .items() 대신 .copy().items() 사용
+            delete_flag = False  # 삭제 플래그
+            
+            if self.identity[k]["frame"] + self.keep_frame < self.frame_number: # keep_frame보다 더 크면 제거
+                delete_flag = True
+                
+            if self.identity[k]["id"] in self.none_zone_ids:
+                self.none_zone_ids.remove(self.identity[k]["id"])
+                delete_flag = True
+            
+            if delete_flag:
                 self.identity.pop(k)
+            
             for zone in self.zones_in: # 감지 영역에 걸치면 제거
                 for line in zone.polygon:
-                    already_del = False
-                    if k not in self.identity:
-                        already_del = True
-                    if not already_del and (k in self.detected_identity) and coord.is_line_over(line, self.identity[k]["center"], self.width, self.height):
+                    if k not in self.identity:  # 이미 삭제된 경우 스킵
+                        continue
+                    if k in self.detected_identity and coord.is_line_over(line, self.identity[k]["center"], self.width, self.height):
                         self.detected_identity.pop(k)
                         self.identity.pop(k)
                         self.delete_related_id(k)
-            # 처리 후 xml 파일로 저장
-            if self.is_file:
+                
+            # 처리 후 self.savedJson에 JSON 데이터로 저장함
+            if self.is_file and k in self.identity:  # 이미 삭제된 경우 스킵
                 position = " ".join([str(int(v["position"][0])), str(int(v["position"][1])), str(int(v["position"][2])), str(int(v["position"][3]))])
                 self.xml.save_data({"card": v["id"], "now_frame": v["frame"], "class": v["class_type"], "position": position})
         
@@ -231,7 +276,7 @@ class VideoProcessor:
                             self.identity[tracker_id]["class"] = target["class"] # car type number
                             self.identity[tracker_id]["class_type"] = target["class_type"] # car_name
         return detections
-    
+
 
     def detect_in_area(self, detections: sv.Detections) -> sv.Detections: # Detect Area 감지 영역 처리
         detections_in_zones = []
@@ -240,6 +285,8 @@ class VideoProcessor:
             detections_in_zone = detections[mask]
             for xyxy in detections_in_zone.xyxy.tolist():
                 index = detections.xyxy.tolist().index(xyxy)
+                self.none_zone_ids.add(detections.tracker_id[index]) # 비감지 영역에 있는 tracker_id 예측하지 않도록 저장
+                detections.tracker_id = np.delete(detections.tracker_id, index, 0)
                 detections.xyxy = np.delete(detections.xyxy, index, 0)
                 detections.confidence = np.delete(detections.confidence, index, 0)
                 detections.class_id = np.delete(detections.class_id, index, 0)
@@ -350,11 +397,16 @@ class VideoProcessor:
     
     # 검출 정보로 JSON 데이터 수집
     def set_identity(self, detections: sv.Detections) -> None:
+        
         none_detected_tracker_ids = list(set(self.detected_identity)-set(detections.tracker_id))
         # 비검출 데이터 처리
         for tracker_id in none_detected_tracker_ids:
             if tracker_id not in self.identity:
                 continue # key 있는 경우에만
+            
+            if tracker_id in self.none_zone_ids:
+                continue
+
             xyxy = coord.predict_xyxy(
                 xyxys=self.identity[tracker_id]['position_array'], 
                 gaps=self.identity[tracker_id]['position_gap'],
@@ -399,11 +451,11 @@ class VideoProcessor:
     
     # 공통 좌표 구하기                    
     def set_position(self, tracker_id:int, xyxy:list) -> None:
-        # xyxy 최대 범위는 -100 ~ 자기 해상도+100까지
-        xyxy[0] = -100 if xyxy[0] < -100 else self.width + 100 if xyxy[0] > self.width + 100 else xyxy[0]
-        xyxy[1] = -100 if xyxy[1] < -100 else self.height + 100 if xyxy[1] > self.height + 100 else xyxy[1]
-        xyxy[2] = -100 if xyxy[2] < -100 else self.width + 100 if xyxy[2] > self.width + 100 else xyxy[2]
-        xyxy[3] = -100 if xyxy[3] < -100 else self.height + 100 if xyxy[3] > self.height + 100 else xyxy[3]
+        # xyxy 최대 범위는 자기 해상도까지
+        xyxy[0] = 0 if xyxy[0] < 0 else self.width if xyxy[0] > self.width else xyxy[0]
+        xyxy[1] = 0 if xyxy[1] < 0 else self.height if xyxy[1] > self.height else xyxy[1]
+        xyxy[2] = 0 if xyxy[2] < 0 else self.width if xyxy[2] > self.width else xyxy[2]
+        xyxy[3] = 0 if xyxy[3] < 0 else self.height if xyxy[3] > self.height else xyxy[3]
         center = (round((xyxy[0]+xyxy[2])/2, 2), round((xyxy[1]+xyxy[3])/2,2))
         self.identity[tracker_id]['position'] = xyxy
         self.identity[tracker_id]['position_array'].append(xyxy)
