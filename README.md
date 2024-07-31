@@ -14,7 +14,7 @@ A short script showing how to build simple real-time video analytics apps using 
 
 ```bash
 # create python virtual environment
-python3 -m venv venv
+python -m venv venv
 
 # activate the virtual environment
 source venv/bin/activate
