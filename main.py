@@ -53,7 +53,7 @@ def set_padding(width: int, height: int, padding: int) -> List[np.ndarray]:
 __init__ : 입력 및 출력, YOLO모델, Tracker, video, 영역 등 초기화 / 카운팅 라인 및 검출 영역 설정
 process_video : 비디오 처리 진입점 / 파일기반 처리 OR 스트림 기반 처리 (파일기반:file_process / 실시간기반:stream_process)
 file_process: 비디오 파일을 프레임 단위로 처리, 1) Detection 공통작업(common_process) / 2) Annotation 처리된 영상 저장 / 3) xml file에 savedJson의 데이터를 저장 
-common_process: 1. 현재 프레임 카운팅 / 2. 기록 데이터 세팅 (set_identity - 검출정보를 savedJson에 JSON 형태로 저장)/
+common_process: 1. 현재 프레임 카운팅 / 2. 기록 데이터 세팅 (set_identity) / 3.검출정보를 savedJson에 JSON 형태로 저장
 set_identity : Detections 데이터를 받아서 1. 비검출된 차량 예측 / 2. 검출 데이터 처리 / 3. 해당 데이터들을 "set_position"으로 self.identity에 전달
 set_position : 1. 좌표값이 자기 해상도를 넘어가지 않도록 값을 변경 / 2. self.identity에 검출 데이터 전달
 
@@ -233,16 +233,16 @@ class VideoProcessor:
         # 기록 데이터 삭제 정리 
         for k, v in list(self.identity.items()):  # .items() 대신 .copy().items() 사용
             delete_flag = False  # 삭제 플래그
-            
-            if self.identity[k]["frame"] + self.keep_frame < self.frame_number: # keep_frame보다 더 크면 제거
-                delete_flag = True
+            if k in self.identity:
+                if self.identity[k]["frame"] + self.keep_frame < self.frame_number: # 마지막 등장 frame이 현재 frame number와의 차이가 keep_frame보다 클경우 삭제
+                    delete_flag = True
                 
-            if self.identity[k]["id"] in self.none_zone_ids:
-                self.none_zone_ids.remove(self.identity[k]["id"])
-                delete_flag = True
+                if self.identity[k]["id"] in self.none_zone_ids: # 비감지 영역에 있는 id의 경우 삭제
+                    self.none_zone_ids.remove(self.identity[k]["id"])
+                    delete_flag = True
             
-            if delete_flag:
-                self.identity.pop(k)
+                if delete_flag:
+                    self.identity.pop(k)
             
             for zone in self.zones_in: # 감지 영역에 걸치면 제거
                 for line in zone.polygon:
@@ -253,10 +253,14 @@ class VideoProcessor:
                         self.identity.pop(k)
                         self.delete_related_id(k)
                 
-            # 처리 후 self.savedJson에 JSON 데이터로 저장함
-            if self.is_file and k in self.identity:  # 이미 삭제된 경우 스킵
-                position = " ".join([str(int(v["position"][0])), str(int(v["position"][1])), str(int(v["position"][2])), str(int(v["position"][3]))])
-                self.xml.save_data({"card": v["id"], "now_frame": v["frame"], "class": v["class_type"], "position": position})
+            # # 처리 후 self.savedJson에 JSON 데이터로 저장함
+            # if self.is_file and k in self.identity:  # 이미 삭제된 경우 스킵
+            #     position = " ".join([str(int(v["position"][0])), str(int(v["position"][1])), str(int(v["position"][2])), str(int(v["position"][3]))])
+            #     self.xml.save_data({
+            #         "card": v["id"], 
+            #         "now_frame": v["frame"], 
+            #         "class": v["class_type"], 
+            #         "position": position})
         
         # 차량 카운팅
         self.counting = self.set_counting()
@@ -309,6 +313,8 @@ class VideoProcessor:
     ) -> np.ndarray:
         annotated_frame = frame.copy()
 
+        detected_ids = detections.tracker_id.tolist()
+
         # 영역 테두리 처리
         if self.detect_zone_show: # 영역 표기 처리일 때만
             for i, zone_in in enumerate(self.zones_in): # 감지 영역
@@ -323,7 +329,7 @@ class VideoProcessor:
                     text_scale=1
                 )
         if self.detect_none_show:
-            for i, zone_in in enumerate(self.none_zone_in): # 비감지 영역
+            for i, zone_in in enumerate(self.none_zone_in): # 비감지 영역 
                 annotated_frame = sv.draw_polygon(
                     annotated_frame, zone_in.polygon, sv.Color.from_hex('#ec4141')
                 )
@@ -360,35 +366,60 @@ class VideoProcessor:
                 if self.is_count_show: # 카운팅 라벨 표시
                     self.line_annotate.annotate(frame=annotated_frame, line_counter=line_counter)
         
-        # 오버레이 검사
-        cant = []
-        for key, val in self.identity.items():
-            if key in self.twins: # 오버레이 선별 처리 (겹치는 데이터 중에 선택)
-                for new, target in self.twins.items():
-                    if new not in self.identity or target not in self.identity:
-                        continue
-                    new_area1 = coord.check_overlap(self.identity[new]["position"], self.identity[target]["position"])
-                    new_area2 = coord.check_overlap(self.identity[target]["position"], self.identity[target]["position"])
-                    target_area1 = coord.check_overlap(self.identity[target]["position"], self.identity[new]["position"])
-                    target_area2 = coord.check_overlap(self.identity[new]["position"], self.identity[new]["position"])
-                    chk1 = (new_area1 + new_area2)/2
-                    chk2 = (target_area1 + target_area2)/2
-                    self.identity[new]["overlay"].append(chk1)
-                    self.identity[target]["overlay"].append(chk2)
-                    if chk1 > chk2: cant.append(target)
-                    else: cant.append(new)
+        # # 오버레이 검사
+        # cant = []
+        # for key, val in self.identity.items():
+        #     if key in self.twins: # 오버레이 선별 처리 (겹치는 데이터 중에 선택)
+        #         for new, target in self.twins.items():
+        #             if new not in self.identity or target not in self.identity:
+        #                 cant.append(new)
+        #                 continue
+        #             new_area1 = coord.check_overlap(self.identity[new]["position"], self.identity[target]["position"])
+        #             new_area2 = coord.check_overlap(self.identity[target]["position"], self.identity[target]["position"])
+        #             target_area1 = coord.check_overlap(self.identity[target]["position"], self.identity[new]["position"])
+        #             target_area2 = coord.check_overlap(self.identity[new]["position"], self.identity[new]["position"])
+        #             chk1 = (new_area1 + new_area2)/2
+        #             chk2 = (target_area1 + target_area2)/2
+        #             self.identity[new]["overlay"].append(chk1)
+        #             self.identity[target]["overlay"].append(chk2)
+        #             if chk1 > chk2: cant.append(target)
+        #             else: cant.append(new)
                     
+        displayed_ids= set()
         # 차량 라벨
         for key, val in self.identity.items():
-            if key not in cant:
-                plot_one_box2(
-                    self.identity[key]["position"], 
-                    annotated_frame, 
-                    self.identity[key]["class_type"], 
-                    label=f"[{self.identity[key]['id']}] {self.identity[key]['speed']}km", 
-                    color=colors_bgr[self.identity[key]["class"]], 
-                    line_thickness=1
-                )
+            # if key not in cant:
+            if self.identity[key]['id'] in displayed_ids:
+                continue
+            displayed_ids.add(self.identity[key]['id'])
+            label = f"[{self.identity[key]['id']}] {self.identity[key]['speed']}km"
+            # if self.identity[key]['predicted']:
+            #     label += " (predicted)"
+            # if key in self.twins:
+            #     original_id = self.twins[key]
+            #     label += f"(original:{original_id})"
+
+            # 처리 후 self.savedJson에 JSON 데이터로 저장함
+            if self.is_file:
+                position = " ".join([
+                    str(int(self.identity[key]["position"][0])), 
+                    str(int(self.identity[key]["position"][1])), 
+                    str(int(self.identity[key]["position"][2])), 
+                    str(int(self.identity[key]["position"][3]))])
+                self.xml.save_data({
+                    "card": self.identity[key]["id"], 
+                    "now_frame": self.identity[key]["frame"], 
+                    "class": self.identity[key]["class_type"], 
+                    "position": position})
+
+            plot_one_box2(
+                self.identity[key]["position"], 
+                annotated_frame, 
+                self.identity[key]["class_type"], 
+                label=label, 
+                color=colors_bgr[self.identity[key]["class"]], 
+                line_thickness=1
+            )
                 
         # 차량 패널 표시
         self.set_info_panel(annotated_frame)
@@ -403,23 +434,21 @@ class VideoProcessor:
         for tracker_id in none_detected_tracker_ids:
             if tracker_id not in self.identity:
                 continue # key 있는 경우에만
-            
             if tracker_id in self.none_zone_ids:
                 continue
-
             xyxy = coord.predict_xyxy(
                 xyxys=self.identity[tracker_id]['position_array'], 
                 gaps=self.identity[tracker_id]['position_gap'],
                 direct=self.identity[tracker_id]['direct']
             )
             self.set_position(tracker_id, xyxy)
-        
+            self.identity[tracker_id]['predicted'] = True
         # 검출 데이터 처리
         for i in range(len(detections.xyxy)):
             xyxy = detections.xyxy[i]
             tracker_id = detections.tracker_id[i]
             center = (round((xyxy[0]+xyxy[2])/2, 2), round((xyxy[1]+xyxy[3])/2,2))
-            if tracker_id not in self.identity:
+            if tracker_id not in self.identity: # 처음으로 검출된 tracker_id / self.identity[tracker_id] 추가
                 self.identity[tracker_id] = {
                     "id": tracker_id, # 비추적
                     "position": xyxy,
@@ -436,10 +465,12 @@ class VideoProcessor:
                     "speed": 0,
                     "start_time": timer.current, # 비추적
                     "now_time": timer.current,
+                    "predicted" : False
                 }
-            else:
+            else: # 기존에 검출된 기록이 있는 tracker_id의 경우
                 self.identity[tracker_id]['frame'] = self.frame_number
                 self.set_position(tracker_id, xyxy)
+                self.identity[tracker_id]['predicted'] = False
                 if self.identity[tracker_id]['speed'] == 0 and len(self.identity[tracker_id]['center_array']) > 2: # 속도가 0이면 즉시 속도 계산
                     speed = coord.estimatespeed(self.identity[tracker_id]['center_array'][-1], self.identity[tracker_id]['center_array'][-2], self.target_fps)
                     self.identity[tracker_id]['speed'] = speed
