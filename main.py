@@ -5,7 +5,7 @@ import numpy as np
 from typing import List, Tuple
 from ast import literal_eval
 from tqdm import tqdm
-from multiprocessing import freeze_support
+from multiprocessing import freeze_support, Process, Queue, Event
 from collections import deque
 from utils.plots_ import plot_one_box2
 import utils.coord as coord
@@ -13,6 +13,10 @@ import utils.argument as arg
 from utils.ffmpeg import FFmpegProcessor
 import utils.timer as timer
 from utils.xml import XML
+from utils.extract import frame_extractor
+
+
+import queue
 
 car_names = ['car', 'truck', 'bus', 'vehicle'] # 차량 info 종류
 colors_bgr = [[17, 133, 254],[255, 156, 100],[11, 189, 128],[0, 255, 255]] # 차량 info bgr 색상
@@ -61,6 +65,8 @@ set_position : 1. 좌표값이 자기 해상도를 넘어가지 않도록 값을
 
 class VideoProcessor:
     def __init__(self, arg: dict) -> None:
+        # experimental part
+        self.frame_queue = Queue(maxsize=10)
         # 인자값 설정
         self.source_video_path = arg["source_video_path"]
         self.target_video_path = arg["target_video_path"]
@@ -160,8 +166,12 @@ class VideoProcessor:
     # 비디오 처리
     def process_video(self) -> None: 
         if self.is_file: self.file_process() # file로 로직 처리
-        else: self.stream_process() # rtmp stream으로 처리
-    
+        else: 
+            producer_process = Process(target=frame_extractor, args=(self.frame_queue, self.source_video_path, 2)) # 마지막 인자값이 몇번째 프레임마다 받을지 결정
+            producer_process.start()
+            self.stream_process() # rtmp stream으로 처리
+            producer_process.join()
+
     
     def file_process(self) -> None:
         frame_generator = sv.get_video_frames_generator(source_path=self.source_video_path)
@@ -184,38 +194,29 @@ class VideoProcessor:
         self.xml.make_xml()
 
 
-    def stream_process(self) -> None:    
+    def stream_process(self) -> None:
         with sv.VideoSink(self.target_video_path, self.video_info) as sink:
-            for result in self.model.track(source=self.source_video_path, show=False, stream=True, device=0, verbose=False, agnostic_nms=True, imgsz=1920):
-                if result.boxes.id is None: # 검출이 안되면 스킵
-                    continue
-                frame = result.orig_img
-                
-                # detection 공통 작업: confidence & nms
+            while True:
+                try:
+                    frame = self.frame_queue.get(timeout=10)
+                except queue.Empty:
+                    break
+                result = self.model(frame, verbose=False, device=0, imgsz=self.video_info.width, tracker=self.tracker_yaml)[0]
                 detections = self.common_process(result)
-
-                # Tracker id
-                if result.boxes is None or result.boxes.id is None:
-                    detections.tracker_id = result.boxes.id.cpu().numpy().astype(int)
-                    
-                # Annotation 처리
                 annotated_frame = self.annotate_frame(frame, detections)
-                # Output 처리
                 numpy_array = np.array(annotated_frame)
-                
-                try: 
+                try:
                     if numpy_array is not None:
-                        self.process.stdin.write(numpy_array.tobytes()) # Output FFmepg
+                        self.process.stdin.write(numpy_array.tobytes())
                         if self.is_show:
                             cv2.imshow("OpenCV View", numpy_array)
-                except Exception as e: # 오류 발생 시 subprocess 종료
-                    print(e) 
+                except Exception as e:
+                    print(e)
                     self.process.terminate()
                     break
-                
-                if (cv2.waitKey(1) == 27): # ESC > stop
+                if cv2.waitKey(1) == 27:  # ESC 키를 눌렀을 때
                     break
-                
+
                 
     def common_process(self, track) -> sv.Detections:
         global now_frame
@@ -253,15 +254,6 @@ class VideoProcessor:
                         self.identity.pop(k)
                         self.delete_related_id(k)
                 
-            # # 처리 후 self.savedJson에 JSON 데이터로 저장함
-            # if self.is_file and k in self.identity:  # 이미 삭제된 경우 스킵
-            #     position = " ".join([str(int(v["position"][0])), str(int(v["position"][1])), str(int(v["position"][2])), str(int(v["position"][3]))])
-            #     self.xml.save_data({
-            #         "card": v["id"], 
-            #         "now_frame": v["frame"], 
-            #         "class": v["class_type"], 
-            #         "position": position})
-        
         # 차량 카운팅
         self.counting = self.set_counting()
         
@@ -365,26 +357,7 @@ class VideoProcessor:
                         
                 if self.is_count_show: # 카운팅 라벨 표시
                     self.line_annotate.annotate(frame=annotated_frame, line_counter=line_counter)
-        
-        # # 오버레이 검사
-        # cant = []
-        # for key, val in self.identity.items():
-        #     if key in self.twins: # 오버레이 선별 처리 (겹치는 데이터 중에 선택)
-        #         for new, target in self.twins.items():
-        #             if new not in self.identity or target not in self.identity:
-        #                 cant.append(new)
-        #                 continue
-        #             new_area1 = coord.check_overlap(self.identity[new]["position"], self.identity[target]["position"])
-        #             new_area2 = coord.check_overlap(self.identity[target]["position"], self.identity[target]["position"])
-        #             target_area1 = coord.check_overlap(self.identity[target]["position"], self.identity[new]["position"])
-        #             target_area2 = coord.check_overlap(self.identity[new]["position"], self.identity[new]["position"])
-        #             chk1 = (new_area1 + new_area2)/2
-        #             chk2 = (target_area1 + target_area2)/2
-        #             self.identity[new]["overlay"].append(chk1)
-        #             self.identity[target]["overlay"].append(chk2)
-        #             if chk1 > chk2: cant.append(target)
-        #             else: cant.append(new)
-                    
+
         displayed_ids= set()
         # 차량 라벨
         for key, val in self.identity.items():
@@ -393,11 +366,6 @@ class VideoProcessor:
                 continue
             displayed_ids.add(self.identity[key]['id'])
             label = f"[{self.identity[key]['id']}] {self.identity[key]['speed']}km"
-            # if self.identity[key]['predicted']:
-            #     label += " (predicted)"
-            # if key in self.twins:
-            #     original_id = self.twins[key]
-            #     label += f"(original:{original_id})"
 
             # 처리 후 self.savedJson에 JSON 데이터로 저장함
             if self.is_file:
@@ -495,7 +463,6 @@ class VideoProcessor:
         self.identity[tracker_id]['center'] = center
         self.identity[tracker_id]['center_array'].append(center)
         self.identity[tracker_id]['direct'] = coord.direct(self.identity[tracker_id]["position_array"]) # 방향
-
         
     # 차량 수 카운팅
     def set_counting(self) -> list[int]:
@@ -523,7 +490,7 @@ class VideoProcessor:
     
 if __name__ == "__main__":
     freeze_support()
-    timer.current_time() # 시간 측정 시작
+    # timer.current_time() # 시간 측정 시작
     processor = VideoProcessor(arg.get_argment())
     processor.process_video()
-    timer.Timer.cancel() # 타임쓰레드 반드시 종료
+    # timer.Timer.cancel() # 타임쓰레드 반드시 종료
